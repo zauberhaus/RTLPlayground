@@ -13,6 +13,7 @@
 
 #define SESSION_ID_LENGTH 12
 #define SESSION_TIMEOUT 200
+#define MAX_SESSIONS 3
 
 #define CMARK_S 6
 
@@ -74,10 +75,11 @@ __xdata char passwd[21];
 // Set when a verified firmware upload awaits its response ACK, after
 // which the chip resets to apply the staged image
 __xdata uint8_t fw_reset_pending;
-__xdata char session_id[SESSION_ID_LENGTH + 1];
+// Up to MAX_SESSIONS concurrent logins, each in its own slot
+__xdata char session_id[MAX_SESSIONS][SESSION_ID_LENGTH + 1];
 __xdata uint8_t authenticated;
 __xdata uint32_t now;
-__xdata uint32_t last_session_use;
+__xdata uint32_t last_session_use[MAX_SESSIONS];
 
 #define TSTATE_NONE		0
 #define TSTATE_TX		1
@@ -100,6 +102,8 @@ inline uint8_t is_separator(uint8_t c)
 
 void httpd_init(void) __banked
 {
+	uint8_t i;
+
 	config_upload = 0; // xdata is not zeroed by the startup code
 	// Start listening to port 80
 	uip_listen(HTONS(80));
@@ -107,6 +111,10 @@ void httpd_init(void) __banked
 	// handling one, and nothing has set it yet at init time.
 	uip_conns[0].appstate.tstate = TSTATE_CLOSED;
 	fw_reset_pending = 0; // xdata is not zeroed by the startup code
+	// xdata is not zeroed by the startup code; an empty session_id[i][0]
+	// marks a slot free
+	for (i = 0; i < MAX_SESSIONS; i++)
+		session_id[i][0] = NUL;
 }
 
 
@@ -341,17 +349,25 @@ __xdata uint8_t *scan_header(__xdata uint8_t * __xdata p)
 
 	read_reg_timer(&now);
 
-	if (session && session_id[0]) {
-		if (now - last_session_use > SESSION_TIMEOUT) {
-			dbg_string("Session expired\n");
-		} else {
-			if (is_word_x(session, session_id)) {
+	if (session) {
+		uint8_t i;
+
+		for (i = 0; i < MAX_SESSIONS; i++) {
+			if (!session_id[i][0])
+				continue;
+			if (now - last_session_use[i] > SESSION_TIMEOUT) {
+				dbg_string("Session expired\n");
+				session_id[i][0] = NUL;	/* reclaim the slot */
+				continue;
+			}
+			if (is_word_x(session, session_id[i])) {
 				authenticated = 1;
-				last_session_use = now;
-			} else {
-				dbg_string("Invalid session cookie!\n");
+				last_session_use[i] = now;
+				break;
 			}
 		}
+		if (!authenticated)
+			dbg_string("Invalid session cookie!\n");
 	}
 	return p;
 }
@@ -655,17 +671,46 @@ static void run_cmd_body(__xdata uint8_t *body)
 }
 
 
+/*
+ * Picks a slot for a new login: a free one, else an expired one, else (all
+ * MAX_SESSIONS slots live) the least-recently-used one, which gets evicted.
+ */
+static uint8_t alloc_session_slot(void)
+{
+	uint8_t i;
+	uint8_t oldest = 0;
+	uint32_t oldest_age = 0;
+	uint32_t age;
+
+	read_reg_timer(&now);
+	for (i = 0; i < MAX_SESSIONS; i++) {
+		if (!session_id[i][0] || now - last_session_use[i] > SESSION_TIMEOUT) {
+			last_session_use[i] = now;
+			return i;
+		}
+		age = now - last_session_use[i];
+		if (age >= oldest_age) {
+			oldest_age = age;
+			oldest = i;
+		}
+	}
+	last_session_use[oldest] = now;
+	return oldest;
+}
+
+
 static void run_login_body(__xdata uint8_t *body)
 {
 	if (strstart(body, "pwd=") && is_url_word_x(body + 4, passwd)) {
+		uint8_t slot = alloc_session_slot();
+
 		dbg_string("Password accepted!\n");
-		read_reg_timer(&last_session_use);
-		gen_random_hex_chars(session_id, SESSION_ID_LENGTH);
-		session_id[SESSION_ID_LENGTH] = NUL;
+		gen_random_hex_chars(session_id[slot], SESSION_ID_LENGTH);
+		session_id[slot][SESSION_ID_LENGTH] = NUL;
 		slen = strtox(outbuf, "HTTP/1.1 302 Found\r\nConnection: close\r\nLocation: index.html\r\n" \
 				      "Set-Cookie: session=");
 		for (uint8_t i = 0; i < SESSION_ID_LENGTH; i++)
-			outbuf[slen++] = session_id[i];
+			outbuf[slen++] = session_id[slot][i];
 		slen += strtox(outbuf + slen, "; SameSite=Strict\r\n\r\n");
 	} else {
 		dbg_string("Password invalid!\n");
