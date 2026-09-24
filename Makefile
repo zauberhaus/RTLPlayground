@@ -65,6 +65,7 @@ SRCS = \
 	rtlplayground.c \
 	boot.c \
 	sfp.c \
+	snmp.c \
 	syslog.c \
 	udp_apps.c
 
@@ -133,6 +134,11 @@ $(SUBDIRSCLEAN):
 
 $(BUILDDIR)/%.rel: %.c | create_build_dir html_data.h
 	$(CC) -MMD $(CC_FLAGS) -o $@ -c $<
+
+# snmp.c is oversized for the 8051's internal RAM without stack-auto;
+# see the comment at the top of snmp.c.
+$(BUILDDIR)/snmp.rel: snmp.c | create_build_dir html_data.h
+	$(CC) -MMD $(CC_FLAGS) --stack-auto -o $@ -c $<
 
 $(BUILDDIR)/%.rel: %.asm | create_build_dir
 	${ASM} ${AFLAGS} -o $@ $<
