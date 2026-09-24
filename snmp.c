@@ -6,8 +6,9 @@
  * port 161 and encodes/decodes BER by hand.
  *
  * Layout notes:
- *  - The whole module is banked into BANK2 like syslog/dhcp so
- *    the parser/encoder does not steal precious HOME code space.
+ *  - The whole module is banked into BANK3 (like boot/sfp/lldp) so
+ *    the parser/encoder does not steal precious HOME code space;
+ *    BANK2 no longer has room once this module is added.
  *  - The MIB is stored as a flat table of "descriptors" ordered
  *    lexicographically. GET-NEXT walks the table in order and
  *    within a table descriptor iterates over ifIndex.
@@ -27,8 +28,8 @@
 #include "version.h"
 #include "snmp.h"
 
-#pragma codeseg BANK2
-#pragma constseg BANK2
+#pragma codeseg BANK3
+#pragma constseg BANK3
 /*
  * Put every function in this translation unit on the software stack.
  * The 8051's internal RAM is already full without SNMP (see mem map);
