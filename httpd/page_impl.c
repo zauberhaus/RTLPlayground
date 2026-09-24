@@ -30,7 +30,7 @@ extern __xdata uint16_t slen;
 extern __xdata uint16_t management_vlan;
 extern __xdata uint16_t cont_len;
 extern __xdata uint32_t cont_addr;
-extern __code uint8_t * __code hex;
+extern __code const uint8_t * __code const hex;
 extern __xdata uip_ipaddr_t uip_hostaddr, uip_draddr, uip_netmask;
 
 extern __xdata uint8_t sfr_data[4];
@@ -50,8 +50,11 @@ extern __xdata uint8_t sfp_options[2];
 extern __xdata uint16_t lldp_physical_port_status;
 extern __xdata bool lldp_enabled;
 
-__code uint8_t * __code HTTP_RESPONCE_JSON = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n";
-__code uint8_t * __code HTTP_RESPONCE_TXT = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n";
+extern __xdata uint16_t lldp_physical_port_status;
+extern __xdata bool lldp_enabled;
+
+__code const uint8_t * __code const HTTP_RESPONCE_JSON = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n";
+__code const uint8_t * __code const HTTP_RESPONCE_TXT = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n";
 
 // Convert uint8_t to ascii HEX char push on html-buffer.
 void charhex_to_html(char c)
@@ -130,7 +133,7 @@ void itoa16_html(uint16_t v) /* sufficient for VLAN IDs (max 4094) */
 	char_to_html('0' + (v % 10));
 }
 
-void string_to_html(__code char *s)
+void string_to_html(__code const char *s)
 {
 	while (*s) char_to_html(*s++);
 }

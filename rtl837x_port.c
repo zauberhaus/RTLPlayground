@@ -18,9 +18,9 @@
 #pragma codeseg BANK1
 #pragma constseg BANK1
 
-extern __code uint8_t * __code hex;
-extern __code uint16_t bit_mask[16];
-extern __code struct machine machine;
+extern __code const uint8_t * __code const hex;
+extern __code const uint16_t bit_mask[16];
+extern __code const struct machine machine;
 extern __xdata uint8_t sfr_data[4];
 extern __xdata uint16_t vlan_ptr;
 extern __xdata uint8_t vlan_names[VLAN_NAMES_SIZE];
@@ -590,12 +590,12 @@ void port_eee_enable(__xdata uint8_t port,__xdata uint8_t speed) __banked
 
 	if (machine.is_sfp[port])
 	{
-		print_string("EEE can't be enabled for SFP port "); print_byte(port); print_string("\n");
+		print_string("EEE can't be enabled for SFP port "); print_phys_port(port); print_string("\n");
 		return;
 	}
 
 	REG_SET(RTL837X_EEE_CTRL_BASE + (port << 8), EEE_RX_ENABLE | EEE_TX_ENABLE);
-	print_string("EEE on for "); print_byte(port); print_string(" speed "); 
+	print_string("EEE on for "); print_phys_port(port); print_string(" speed "); 
 	// Enable all speeds up to the specified speed
 	if (speed & EEE_100) {
 			print_string("100m\n");
@@ -654,7 +654,7 @@ void port_eee_disable(uint8_t port) __banked
 	if (machine.is_sfp[port])
 		return;
 
-	print_string("EEE off for "); print_byte(port); write_char('\n');
+	print_string("EEE off for "); print_phys_port(port); write_char('\n');
 	REG_SET(RTL837X_EEE_CTRL_BASE + (port << 8), 0);
 	// Disable EEE advertisement for 100/1000BASE-T via EEE Advertisement Reg
 	phy_write(port, PHY_MMD_AN, PHY_EEE_ADV, 0);

@@ -80,9 +80,9 @@ void crc16_bank1(__xdata uint8_t *v) __naked;
 
 __xdata uint8_t idle_ready;
 
-__code uint8_t ownIP[] = { 192, 168, 2, 2 };
-__code uint8_t gatewayIP[] = { 192, 168, 2, 22};
-__code uint8_t netmask[] = { 255, 255, 255, 0};
+__code const uint8_t ownIP[] = { 192, 168, 2, 2 };
+__code const uint8_t gatewayIP[] = { 192, 168, 2, 22};
+__code const uint8_t netmask[] = { 255, 255, 255, 0};
 
 __xdata struct uip_eth_addr uip_ethaddr;
 
@@ -109,8 +109,8 @@ extern __xdata uint8_t gpio_last_value[8];
 
 extern __xdata struct flash_region_t flash_region;
 
-__code uint8_t * __code greeting = "\nA minimal prompt to explore the RTL8372:\n";
-__code uint8_t * __code hex = "0123456789abcdef";
+__code const uint8_t * __code const greeting = "\nA minimal prompt to explore the RTL8372:\n";
+__code const uint8_t * __code const hex = "0123456789abcdef";
 
 __xdata uint8_t flash_buf[FLASH_BUF_SIZE];
 
@@ -128,7 +128,7 @@ __xdata uint8_t igmpEnabled;
 __xdata bool lldp_enabled;
 __xdata char hostname[24];	/* device hostname, default set at boot, see rtl837x_common.h */
 
-__code uint16_t bit_mask[16] = {
+__code const uint16_t bit_mask[16] = {
 	0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020, 0x0040, 0x0080,
 	0x0100, 0x0200, 0x0400, 0x0800, 0x1000, 0x2000, 0x4000, 0x8000
 };
@@ -256,8 +256,19 @@ void write_char(char c)
 	write_char_no_syslog(c);
 
 	if (syslog_state.enabled) {
-		logbuf[syslog_state.writeptr++] = c;
-		syslog_state.writeptr &= (LOGBUF_SIZE - 1);
+		__xdata uint16_t next = (syslog_state.writeptr + 1) & (LOGBUF_SIZE - 1);
+
+		/* The ring is drained once per main loop pass, and a single command
+		 * can print several times its size, so writing on regardless laps
+		 * the reader and the datagram starts mid record. Drop instead, and
+		 * flag a line so the reader empties what is there even if no
+		 * newline has been seen yet. */
+		if (next == syslog_state.readptr) {
+			syslog_state.line_available = 1;
+			return;
+		}
+		logbuf[syslog_state.writeptr] = c;
+		syslog_state.writeptr = next;
 		if (c == '\n')
 			syslog_state.line_available = 1;
 	}
@@ -351,7 +362,7 @@ int memcmp(__xdata const void *a, __xdata const void *b, uint16_t len)
 	return 0;
 }
 
-void memcpyc(__xdata uint8_t *dst, __code uint8_t *src, uint16_t len)
+void memcpyc(__xdata uint8_t *dst, __code const uint8_t *src, uint16_t len)
 {
 	while (len--)
 		*dst++ = *src++;
@@ -787,7 +798,7 @@ void nic_tx_packet(uint16_t ring_ptr)
  * Note that the address in the flash memory is not simply 0xbbaddr, because
  * the size of a bank is merely 0xc000.
  */
-uint8_t read_flash(uint8_t bank, __code uint8_t *addr)
+uint8_t read_flash(uint8_t bank, __code const uint8_t *addr)
 {
 	uint8_t v;
 	uint8_t current_bank = PSBANK;
@@ -975,14 +986,19 @@ void tcpip_output(void)
 }
 
 
+#define RX_BUDGET 4
+
 void handle_rx(void)
 {
-	// Check the amount of data available on the NIC/ASIC side
-	reg_read_m(RTL837X_REG_NIC_RX_BUFF_DATA);
-	if (sfr_data[2] != 0 || sfr_data[3] != 0) {
-		reg_read_m(RTL837X_REG_CPU_RX_CURR_PKT);
-		uint16_t ring_ptr = ((uint16_t)sfr_data[2]) << 8;
-		ring_ptr |= sfr_data[3];
+	__xdata uint8_t budget = RX_BUDGET;
+
+	while (budget--) {
+		// Check the amount of data available on the NIC/ASIC side
+		reg_read(RTL837X_REG_NIC_RX_BUFF_DATA);
+		if (!SFR_DATA_U16)
+			break;
+		reg_read(RTL837X_REG_CPU_RX_CURR_PKT);
+		uint16_t ring_ptr = SFR_DATA_U16;
 		ring_ptr <<= 3;
 		if (!nic_rx_header(ring_ptr)) {
 			REG_SET(RTL837X_REG_NIC_RXCMD, 1);
@@ -1163,7 +1179,9 @@ void handle_button(void)
 //
 void idle(void)
 {
-	PCON |= 1;
+	reg_read(RTL837X_REG_NIC_RX_BUFF_DATA);
+	if (!SFR_DATA_U16)
+		PCON |= 1;
 	if (sec_counter >= SYS_TICK_HZ) {
 		sec_counter -= SYS_TICK_HZ;
 		reg_read_m(RTL837X_REG_SEC_COUNTER);

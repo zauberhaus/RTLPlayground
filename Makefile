@@ -20,6 +20,10 @@ else
 	CC_FLAGS += -DMACHINE_$(MACHINE)
 endif
 
+ifeq ($(CI),1)
+	CC_FLAGS += --Werror
+endif
+
 BUILDDIR = output/$(MACHINE)
 VERSION_HEADER := version.h
 
@@ -135,7 +139,7 @@ $(BUILDDIR)/%.rel: %.asm | create_build_dir
 #	mv -f $(addprefix $(basename $^), .lst .rel .sym) .
 
 $(BUILDDIR)/rtlplayground.ihx: $(OBJS) $(BUILDDIR)/crtbank.rel $(BUILDDIR)/crc16.rel
-	$(CC) $(CC_FLAGS) -Wl-bHOME=0x00000 -Wl-bBANK1=0x14000 -Wl-bBANK2=0x24000 -Wl-bBANK3=0x34000 -Wl-r -o $@ $^
+	$(CC) $(CC_FLAGS) --xram-size 49151 -Wl-bHOME=0x00000 -Wl-bBANK1=0x14000 -Wl-bBANK2=0x24000 -Wl-bBANK3=0x34000 -Wl-r -o $@ $^
 
 $(BUILDDIR)/rtlplayground.img: $(BUILDDIR)/rtlplayground.ihx
 	objcopy --input-target=ihex -O binary $< $@

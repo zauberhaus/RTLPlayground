@@ -126,6 +126,10 @@
 #define RTL837X_REG_I2C_CTRL2		0x041c
 #define RTL837X_REG_I2C_IN		0x0420
 #define RTL837X_REG_I2C_OUT		0x0424
+#define RTL837X_REG_I2C_SCL_SHIFT 5
+#define RTL837X_REG_I2C_SDA_SHIFT 2
+#define RTL837X_REG_I2C_SCL_MASK  0x3
+#define RTL837X_REG_I2C_SDA_MASK  0x7
 
 /*
  * NIC Related registers
@@ -143,6 +147,9 @@
 #define RTL837X_REG_CPU_TAG		0x6720
 #define RTL837X_REG_CPU_TAG_AWARE_PMASK	0x603C
 #define RTL837X_REG_MAC_FORCE_MODE	0x6344
+
+/* Flags in byte 1 of the RX frame descriptor */
+#define RX_TAG_L4_CSUM_BAD		0x04
 
 /*
  * Statistics related registers
