@@ -84,7 +84,8 @@ SRCS += \
 SRCS += \
 	httpd/httpd.c \
 	httpd/page_impl.c \
-	httpd/page_impl_snmp.c
+	httpd/page_impl_snmp.c \
+	httpd/page_impl_lldp.c
 SRCS += \
 	uip/timer.c \
 	uip/uip.c \

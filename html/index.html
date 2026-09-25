@@ -65,6 +65,8 @@ a{color:var(--ac);text-decoration:none}
   border:1px solid var(--warn);border-radius:20px;padding:2px 10px;
 }
 #dirty.show{display:inline-block}
+#revertBtn{display:none}
+#revertBtn.show{display:inline-block}
 select.ctl,button.ctl{
   background:var(--panel2);border:1px solid var(--bd);border-radius:7px;
   padding:5px 9px;cursor:pointer;font-size:13px;white-space:nowrap;
@@ -216,6 +218,7 @@ button.danger{background:var(--bad);color:#fff;border-color:transparent}
     </button>
     <span id="ttitle"></span>
     <span id="dirty" data-i18n="hdr_dirty" data-i18n-t="hdr_dirty_t">unsaved changes</span>
+    <button class="ctl pri" id="revertBtn" data-i18n="hdr_revert" data-i18n-t="hdr_revert_t">Revert</button>
     <button class="ctl pri" id="saveBtn" data-i18n="hdr_save" data-i18n-t="hdr_save_t">Save to flash</button>
   </header>
 

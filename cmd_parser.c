@@ -962,10 +962,13 @@ void parse_port(void)
 			phy_settings.duplex = PHY_DUPLEX_HALF;
 		phy_set_duplex();
 	} else if (cmd_compare(2, "lldp")) {
+		/* lldp_physical_port_status is indexed by physical port number
+		 * (see send_lldp()); phy_settings.port is logical - convert,
+		 * or this sets the wrong port's bit. */
 		if (cmd_compare(3, "block")){
-			lldp_physical_port_status &= ~(1 << phy_settings.port);
+			lldp_physical_port_status &= ~(1 << machine.log_to_phys_port[phy_settings.port]);
 		} else if (cmd_compare(3, "permit")) {
-			lldp_physical_port_status |= 1 << phy_settings.port;
+			lldp_physical_port_status |= 1 << machine.log_to_phys_port[phy_settings.port];
 		} else {
 			print_string ("Unknown port <port> lldp [block|permit] command\n");
 		}

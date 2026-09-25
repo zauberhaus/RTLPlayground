@@ -47,9 +47,6 @@ extern __xdata char sfp_module_model[2][17];
 extern __xdata char sfp_module_serial[2][17];
 extern __xdata uint8_t sfp_options[2];
 
-extern __xdata uint16_t lldp_physical_port_status;
-extern __xdata bool lldp_enabled;
-
 __code const uint8_t * __code const HTTP_RESPONCE_JSON = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n";
 __code const uint8_t * __code const HTTP_RESPONCE_TXT = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n";
 
@@ -710,24 +707,6 @@ void send_stp(void)
 	slen -= 1; // remove comma
 	slen += strtox(outbuf + slen, "]}");
 }
-
-void send_lldp(void)
-{
-	dbg_string("send_lldp called\n");
-	slen = strtox(outbuf, HTTP_RESPONCE_JSON);
-
-	slen += strtox(outbuf + slen, "{\"on\":");
-	bool_to_html(lldp_enabled);
-	slen += strtox(outbuf + slen, ",\"port_status\": [");
-
-	for (uint8_t port = machine.min_port; port <= machine.max_port; port++) {
-		bool_to_html((1 << machine.log_to_phys_port[port]) & lldp_physical_port_status);
-		slen += strtox(outbuf + slen, ",");
-    }
-
-	slen += strtox(outbuf + slen, "]}");
-}
-
 
 void send_eee(void)
 {

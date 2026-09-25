@@ -19,8 +19,15 @@ void send_config(void);
 void send_cmd_log(void);
 void send_lag(void);
 void send_stp(void);
-void send_lldp(void);
-void send_snmp(void);
+/* Lives in page_impl_lldp.c, banked into BANK3 - see send_snmp()'s
+ * comment below for why __banked is required here. */
+void send_lldp(void) __banked;
+/* Lives in page_impl_snmp.c, banked into BANK3 (unlike the other
+ * send_*() functions here, which share page_impl.c's BANK1 with their
+ * caller in httpd.c) - __banked is required so the call crosses banks
+ * correctly instead of silently jumping into whatever is mapped at
+ * that address in the caller's own bank. */
+void send_snmp(void) __banked;
 void send_vlanlist(void);
 
 /*  Convert only the lower nibble to ascii HEX char.

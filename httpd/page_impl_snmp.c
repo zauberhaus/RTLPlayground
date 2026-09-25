@@ -29,7 +29,7 @@ static void json_char(uint8_t c)
 	outbuf[slen++] = c;
 }
 
-void send_snmp(void)
+void send_snmp(void) __banked
 {
 	slen = strtox(outbuf, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n");
 

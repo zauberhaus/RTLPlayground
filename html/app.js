@@ -6,6 +6,9 @@ nav_vlan:"VLANs",nav_l2:"MAC table",nav_mirror:"Mirroring",nav_lag:"LAG",nav_eee
 nav_bw:"Bandwidth",nav_system:"System",nav_fw:"Firmware",nav_lldp:"LLDP",nav_snmp:"SNMP",
 hdr_dirty:"unsaved changes",hdr_dirty_t:"Running config differs from startup config",
 hdr_save:"Save to flash",hdr_save_t:"Persist running configuration to flash",
+hdr_revert:"Revert",hdr_revert_t:"Reboot and discard unsaved changes",
+revert_q:"Discard unsaved changes?",
+revert_d:"The switch will reboot and reload the saved configuration. Changes made this session will be lost.",
 th_auto:"System",th_auto_sel:"System (Selenized)",sy_display:"Display",sy_theme:"Theme",sy_display_note:"Stored in this browser only.",th_light:"Light",th_dark:"Dark",
 th_sel_light:"Selenized Light",th_sel_dark:"Selenized Dark",
 c_port:"Port",c_name:"Name",c_link:"Link",c_apply:"Apply",c_cancel:"Cancel",c_confirm:"Confirm",
@@ -121,6 +124,9 @@ nav_vlan:"VLAN",nav_l2:"MAC テーブル",nav_mirror:"ミラーリング",nav_la
 nav_bw:"帯域制限",nav_system:"システム",nav_fw:"ファームウェア",
 hdr_dirty:"未保存の変更",hdr_dirty_t:"実行中の設定が起動設定と異なります",
 hdr_save:"フラッシュに保存",hdr_save_t:"実行中の設定をフラッシュに書き込む",
+hdr_revert:"元に戻す",hdr_revert_t:"再起動して未保存の変更を破棄する",
+revert_q:"未保存の変更を破棄しますか?",
+revert_d:"スイッチが再起動し、保存済みの設定を再読み込みします。このセッションでの変更は失われます。",
 th_auto:"システム",th_auto_sel:"システム (Selenized)",sy_display:"表示",sy_theme:"テーマ",sy_display_note:"このブラウザーにのみ保存されます。",th_light:"ライト",th_dark:"ダーク",
 th_sel_light:"Selenized ライト",th_sel_dark:"Selenized ダーク",
 c_port:"ポート",c_name:"名前",c_link:"リンク",c_apply:"適用",c_cancel:"キャンセル",c_confirm:"確認",
@@ -232,6 +238,9 @@ nav_vlan:"VLAN",nav_l2:"MAC 表",nav_mirror:"端口镜像",nav_lag:"LAG",nav_eee
 nav_bw:"带宽限制",nav_system:"系统",nav_fw:"固件",
 hdr_dirty:"未保存的更改",hdr_dirty_t:"运行配置与启动配置不同",
 hdr_save:"保存到 Flash",hdr_save_t:"将运行配置写入 Flash",
+hdr_revert:"还原",hdr_revert_t:"重启并放弃未保存的更改",
+revert_q:"放弃未保存的更改?",
+revert_d:"交换机将重启并重新加载已保存的配置。本次会话所做的更改将丢失。",
 th_auto:"跟随系统",th_auto_sel:"跟随系统 (Selenized)",sy_display:"显示",sy_theme:"主题",sy_display_note:"仅保存在此浏览器中。",th_light:"浅色",th_dark:"深色",
 th_sel_light:"Selenized 浅色",th_sel_dark:"Selenized 深色",
 c_port:"端口",c_name:"名称",c_link:"链路",c_apply:"应用",c_cancel:"取消",c_confirm:"确认",
@@ -343,6 +352,9 @@ nav_vlan:"VLAN",nav_l2:"Tabla MAC",nav_mirror:"Duplicación",nav_lag:"LAG",nav_e
 nav_bw:"Ancho de banda",nav_system:"Sistema",nav_fw:"Firmware",
 hdr_dirty:"cambios sin guardar",hdr_dirty_t:"La configuración en ejecución difiere de la guardada",
 hdr_save:"Guardar en flash",hdr_save_t:"Persistir la configuración en ejecución a flash",
+hdr_revert:"Revertir",hdr_revert_t:"Reiniciar y descartar los cambios sin guardar",
+revert_q:"¿Descartar los cambios sin guardar?",
+revert_d:"El switch se reiniciará y recargará la configuración guardada. Los cambios de esta sesión se perderán.",
 th_auto:"Sistema",th_auto_sel:"Sistema (Selenized)",sy_display:"Pantalla",sy_theme:"Tema",sy_display_note:"Se almacena solo en este navegador.",th_light:"Claro",th_dark:"Oscuro",
 th_sel_light:"Selenized claro",th_sel_dark:"Selenized oscuro",
 c_port:"Puerto",c_name:"Nombre",c_link:"Enlace",c_apply:"Aplicar",c_cancel:"Cancelar",c_confirm:"Confirmar",
@@ -571,7 +583,14 @@ function isConfCmd(line){
 function setDirty(d){
   S.dirty=d;
   $("dirty").classList.toggle("show",d);
+  $("revertBtn").classList.toggle("show",d);
 }
+$("revertBtn").addEventListener("click",function(){
+  confirmModal(t("revert_q"),t("revert_d"),function(){
+    api("/reset").catch(function(){});
+    toast(t("sy_rebooting"),"ok");
+  });
+});
 function postCmd(cmd,quiet){
   return api("/cmd",{method:"POST",body:cmd}).then(function(r){
     if(!r.ok)throw new Error(((r.body||"").split("\n")[0])||t("t_rejected",{c:cmd}));
@@ -1532,6 +1551,10 @@ tabHooks.lag={enter:function(){needPorts(function(){buildLag();lagLoad().catch(f
 function lldpLoad(){
   return getJSON("/lldp.json").then(function(s){
     $("lldp_en").checked=s.on;
+    // Keyed by portNum: the array's own order is logical-port order,
+    // which does not generally match S.ports' physical-port order.
+    var stat={};
+    (s.port_status||[]).forEach(function(e){stat[e.portNum]=e.on});
     var tb=$("lldp_table").tBodies[0];tb.innerHTML="";
     if(tb.rows.length!==S.n){
       tb.innerHTML="";
@@ -1552,7 +1575,7 @@ function lldpLoad(){
           postCmd("port "+p.portNum+" lldp "+(this.checked?"permit":"block"))
             .then(function(){setTimeout(lldpLoad,300)}).catch(function(){});
         }}),h("i")]);
-      sw.firstChild.checked=s.port_status[p.portNum-1];
+      sw.firstChild.checked=!!stat[p.portNum];
       r.cells[2].appendChild(sw);
     });
   }).catch(function(e){console.log("ERROR!"); console.log(e)});
