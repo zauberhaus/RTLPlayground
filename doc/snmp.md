@@ -3,10 +3,10 @@
 This firmware ships a small read-only SNMPv1 / SNMPv2c agent on
 UDP port 161. Its purpose is to expose the state that already lives
 on the switch (system identity, uptime, per-port link state, per-port
-counters) to any off-the-shelf monitoring tool - Grafana with
-`snmp_exporter`, LibreNMS, Zabbix, PRTG, `net-snmp` from the shell,
-etc. There is no support for SNMPv3, no support for `SetRequest`, and
-no traps.
+counters, the L2/MAC address table, LLDP TX status) to any off-the-shelf
+monitoring tool - Grafana with `snmp_exporter`, LibreNMS, Zabbix, PRTG,
+`net-snmp` from the shell, etc. There is no support for SNMPv3, no
+support for `SetRequest`, and no traps.
 
 ## Enabling the agent
 
@@ -40,12 +40,19 @@ therefore follows the `hostname` command.
 ```
 snmpwalk -v2c -c public 192.168.10.247 system
 snmpwalk -v2c -c public 192.168.10.247 ifTable
+snmpwalk -v2c -c public 192.168.10.247 dot1dTpFdbTable
 ```
 
-Or, to browse everything the agent serves:
+Or, to browse everything the agent serves under mib-2:
 
 ```
 snmpwalk -v2c -c public 192.168.10.247 .1.3.6.1.2.1
+```
+
+LLDP-MIB lives outside mib-2 (see below), so it needs its own walk:
+
+```
+snmpwalk -v2c -c public 192.168.10.247 .1.0.8802.1.1.2.1
 ```
 
 ## Served MIB
@@ -105,7 +112,63 @@ Served ipNetToMediaTable columns:
 | `ipNetToMediaType` | `.1.4.<n>` | INTEGER | always `3` (dynamic) |
 
 `<n>` is the 1-based ARP cache slot number (1-8), not a real index
-value - see the next section.
+value - see Limitations below.
+
+### `ifXTable` (`.1.3.6.1.2.1.31.1.1.1`)
+
+Just the two columns worth the extra code size:
+
+| column | OID suffix | type | value |
+|--------|------------|------|-------|
+| `ifName` | `.1.<n>` | OCTET STRING | the port's configured name (`port <n> name ...`) |
+| `ifHighSpeed` | `.15.<n>` | Gauge32 | link speed in Mbit/s, uncapped (use this instead of `ifSpeed` for 2.5 G/5 G/10 G links, which saturate `ifSpeed`'s 32-bit bits/s range) |
+
+No `ifHCInOctets`/`ifHCInUcastPkts`/etc. (64-bit counters): the ASIC
+does not give the CPU real 64-bit byte counters any more than it does
+for the 32-bit `ifInOctets`/`ifOutOctets` above, so a Counter64 column
+here would just re-encode the same packet count in a wider format for
+no benefit.
+
+### `dot1dTpFdbTable` (`.1.3.6.1.2.1.17.4.3.1`) - the L2/MAC address table
+
+The switch's forwarding database - what MAC addresses it has learned
+on which port, the same data as `/l2.json` / the CLI's L2 table. This
+is the most commonly polled table on a managed switch (asset tracking,
+NAC, topology tools).
+
+| column | OID suffix | type | value |
+|--------|------------|------|-------|
+| `dot1dTpFdbAddress` | `.1.<n>` | OCTET STRING | MAC address |
+| `dot1dTpFdbPort` | `.2.<n>` | INTEGER | `ifIndex` of the port the entry was learned on |
+| `dot1dTpFdbStatus` | `.3.<n>` | INTEGER | `learned(3)` for dynamic entries, `mgmt(5)` for statically configured ones |
+
+`<n>` is the raw ASIC L2 hash-table slot (0-4095) plus one, not the
+MAC address - see Limitations below. `GetNext` walks the table using
+the ASIC's own "next occupied slot" hardware primitive rather than
+probing all 4096 slots per step, so a full `snmpwalk` stays fast even
+though the index space is large and sparse.
+
+### LLDP-MIB (`.1.0.8802.1.1.2.1`, IEEE 802.1AB)
+
+**TX-only**: this firmware does not process received LLDP frames, so
+there is no `lldpRemTable` (neighbor/topology data) - only what this
+switch itself advertises. Lives outside mib-2 under IEEE's own arc, so
+it will not appear in a plain `snmpwalk` of `.1.3.6.1.2.1`.
+
+`lldpLocalSystemData` (`.3`, scalars):
+
+| OID | OID suffix | type | value |
+|-----|------------|------|-------|
+| `lldpLocChassisIdSubtype.0` | `.3.1.0` | INTEGER | always `4` (macAddress) |
+| `lldpLocChassisId.0` | `.3.2.0` | OCTET STRING | CPU MAC address |
+| `lldpLocSysName.0` | `.3.3.0` | OCTET STRING | `hostname` |
+| `lldpLocSysDesc.0` | `.3.4.0` | OCTET STRING | machine model string |
+
+`lldpPortConfigTable` (`.1.6.1`, one column):
+
+| column | OID suffix | type | value |
+|--------|------------|------|-------|
+| `lldpPortConfigAdminStatus` | `.1.6.1.2.<n>` | INTEGER | `txOnly(3)` if LLDP and this port's send bit are both enabled, `disabled(4)` otherwise |
 
 ### Limitations
 
@@ -117,8 +180,9 @@ value - see the next section.
 * Received packets are matched against a single, static community
   string; anyone with the community can walk the MIB. Do not enable
   the agent on interfaces where this is not acceptable.
-* No IPv6, no SNMPv3, no ifXTable (64-bit counters), no bridge MIB,
-  no LLDP MIB. Only the columns above.
+* No IPv6, no SNMPv3. Only the columns documented above - no ifXTable
+  64-bit counters, no `dot1dBase`/`dot1dStp` groups, no LLDP
+  `lldpRemTable` (see the LLDP-MIB section above).
 * Byte counters are not exposed by the ASIC to the CPU port
   directly; `ifInOctets` / `ifOutOctets` report the RX / TX packet
   count so that graphs still show growth over time.
@@ -129,3 +193,15 @@ value - see the next section.
   record). `snmpwalk`/`snmpget` still return correct IP/MAC values -
   only tooling that parses the index itself to recover the IP address,
   instead of reading `ipNetToMediaNetAddress`, is affected.
+* `dot1dTpFdbTable`'s real INDEX is `dot1dTpFdbAddress` (the MAC
+  itself); this agent indexes by raw ASIC hash-table slot instead
+  and reports the MAC as an ordinary value column. Same caveat as
+  above: `snmpwalk`/`snmpget` return correct values, but tooling that
+  parses the OID index to recover the MAC (instead of reading
+  `dot1dTpFdbAddress`) will not work against this agent.
+* `dot1dTpFdbPort` does not resolve LAG membership: a port that is a
+  LAG member is reported as its own `ifIndex`, matching `/l2.json`'s
+  `port` field, not the LAG's.
+* LLDP-MIB's `lldpPortConfigAdminStatus` only ever reports `txOnly`
+  or `disabled` - `rxOnly` and `txAndRx` never apply, since this
+  agent never processes received LLDP frames (see above).

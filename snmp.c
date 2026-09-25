@@ -2,7 +2,9 @@
  * Minimal SNMPv1 / SNMPv2c agent for RTL837x switches.
  *
  * The agent is read-only and serves a curated subset of MIB-II
- * (see snmp.h). It runs on top of uIP as a UDP application on
+ * (system, ifTable, ifXTable's ifName/ifHighSpeed, ipNetToMediaTable),
+ * BRIDGE-MIB's dot1dTpFdbTable, and IEEE 802.1AB's LLDP-MIB (TX-side
+ * only - see snmp.h). It runs on top of uIP as a UDP application on
  * port 161 and encodes/decodes BER by hand.
  *
  * Layout notes:
@@ -11,9 +13,14 @@
  *    BANK2 no longer has room once this module is added.
  *  - The MIB is stored as a flat table of "descriptors" ordered
  *    lexicographically. GET-NEXT walks the table in order and
- *    within a table descriptor iterates over ifIndex.
+ *    within a table descriptor iterates over its row instance.
  *  - Values are computed on the fly by a dispatch on the
  *    descriptor's handler id; nothing is cached.
+ *  - Nodes carry a prefix_id selecting which fixed OID prefix they
+ *    hang off: mib-2 (1.3.6.1.2.1) for everything except the
+ *    LLDP-MIB block, which lives under IEEE's own arc
+ *    (1.0.8802.1.1.2.1) and needs 2-byte subid encoding for "8802" -
+ *    see ber_read_oid()/put_oid_bytes().
  */
 
 // #define DEBUG
@@ -42,6 +49,8 @@ extern __code struct machine machine;
 extern __xdata volatile uint32_t ticks;
 extern __xdata struct uip_eth_addr uip_ethaddr;
 extern __xdata uint8_t sfr_data[4];
+extern __xdata uint16_t lldp_physical_port_status;
+extern __xdata bool lldp_enabled;
 
 /*
  * Globals for the module. Kept in xdata; the CPU has no cycles to
@@ -50,10 +59,11 @@ extern __xdata uint8_t sfr_data[4];
 __xdata struct snmp_state snmp_state;
 __xdata uip_ipaddr_t snmp_server_ip;
 
-/* Working buffer for the OID we are currently answering. Subids up to
- * 127 are all that the served MIB uses so uint8_t is enough. */
+/* Working buffer for the OID we are currently answering. uint16_t
+ * because the LLDP-MIB prefix's "8802" arc needs 14 bits; every other
+ * subid in the served MIB still fits in 7. */
 #define SNMP_OID_MAX 16
-__xdata uint8_t snmp_oid[SNMP_OID_MAX];
+__xdata uint16_t snmp_oid[SNMP_OID_MAX];
 __xdata uint8_t snmp_oid_len;
 
 /* PDU state extracted from the request. request-id and error-status
@@ -107,6 +117,13 @@ __xdata uint16_t snmp_sender_port;
  * UIP_ARPTAB_SIZE) instead of ifIndex, and rows with an empty ARP
  * slot are skipped during lookup/GET-NEXT. */
 #define KIND_ARPTABLE	2
+/* Like KIND_TABLE but the instance is a raw ASIC L2 hash-table slot
+ * (0..FDB_IDX_MAX, reported as instance slot+1) rather than a small
+ * bounded count: walked directly via the hardware's own "next valid
+ * entry >= idx" primitive instead of the generic try-every-instance
+ * loop, which would be far too slow over a 4096-slot table. See
+ * fdb_read_at_or_after(). */
+#define KIND_FDBTABLE	3
 
 /* Handler ids double as symbolic names for the switch in
  * snmp_encode_value(). */
@@ -119,55 +136,102 @@ enum {
 	H_IFINOCTETS, H_IFINUCAST, H_IFINERR,
 	H_IFOUTOCTETS, H_IFOUTUCAST, H_IFOUTERR,
 	H_ARPIFINDEX, H_ARPPHYSADDR, H_ARPNETADDR, H_ARPTYPE,
+	H_IFNAME, H_IFHIGHSPEED,
+	H_FDBADDR, H_FDBPORT, H_FDBSTATUS,
+	H_LLDPPORTADMIN, H_LLDPCHASSISSUBTYPE, H_LLDPCHASSISID,
+	H_LLDPSYSNAME, H_LLDPSYSDESC,
 };
 
 struct mib_node {
 	uint8_t suffix_len;
 	uint8_t suffix[6];
+	uint8_t prefix_id;	/* 0 = mib_prefix (mib-2), 1 = lldp_prefix */
 	uint8_t kind;
 	uint8_t handler;
 };
 
-/* MIB nodes past 1.3.6.1.2.1 . Kept in lex order. */
+/* MIB nodes past the node's own prefix (mib_prefix or lldp_prefix,
+ * see prefix_at()/prefix_len()). Kept in lex order over the full
+ * absolute OID (prefix included) so GET-NEXT can just walk the
+ * table: the LLDP-MIB block sorts before every mib-2 entry, since
+ * 1.0 < 1.3. */
 static __code const struct mib_node mib_table[] = {
-	{ 2, { 1, 1 },       KIND_SCALAR, H_SYSDESCR },
-	{ 2, { 1, 2 },       KIND_SCALAR, H_SYSOBJID },
-	{ 2, { 1, 3 },       KIND_SCALAR, H_SYSUPTIME },
-	{ 2, { 1, 4 },       KIND_SCALAR, H_SYSCONTACT },
-	{ 2, { 1, 5 },       KIND_SCALAR, H_SYSNAME },
-	{ 2, { 1, 6 },       KIND_SCALAR, H_SYSLOCATION },
-	{ 2, { 1, 7 },       KIND_SCALAR, H_SYSSERVICES },
-	{ 2, { 2, 1 },       KIND_SCALAR, H_IFNUMBER },
-	{ 4, { 2, 2, 1, 1 }, KIND_TABLE,  H_IFINDEX },
-	{ 4, { 2, 2, 1, 2 }, KIND_TABLE,  H_IFDESCR },
-	{ 4, { 2, 2, 1, 3 }, KIND_TABLE,  H_IFTYPE },
-	{ 4, { 2, 2, 1, 4 }, KIND_TABLE,  H_IFMTU },
-	{ 4, { 2, 2, 1, 5 }, KIND_TABLE,  H_IFSPEED },
-	{ 4, { 2, 2, 1, 6 }, KIND_TABLE,  H_IFPHYS },
-	{ 4, { 2, 2, 1, 7 }, KIND_TABLE,  H_IFADMIN },
-	{ 4, { 2, 2, 1, 8 }, KIND_TABLE,  H_IFOPER },
-	{ 4, { 2, 2, 1, 10 }, KIND_TABLE, H_IFINOCTETS },
-	{ 4, { 2, 2, 1, 11 }, KIND_TABLE, H_IFINUCAST },
-	{ 4, { 2, 2, 1, 14 }, KIND_TABLE, H_IFINERR },
-	{ 4, { 2, 2, 1, 16 }, KIND_TABLE, H_IFOUTOCTETS },
-	{ 4, { 2, 2, 1, 17 }, KIND_TABLE, H_IFOUTUCAST },
-	{ 4, { 2, 2, 1, 20 }, KIND_TABLE, H_IFOUTERR },
-	/* ipNetToMediaTable (.1.3.6.1.2.1.4.22.1): the ARP cache. Real
-	 * INDEX is { ifIndex, ipNetToMediaNetAddress }; we index by ARP
-	 * slot number instead (see KIND_ARPTABLE) and report a constant
+	/* LLDP-MIB (IEEE 802.1AB), 1.0.8802.1.1.2.1.*. TX-only: this
+	 * firmware does not process received LLDP frames, so there is
+	 * no lldpRemTable (neighbor data) - see doc/snmp.md. */
+	{ 4, { 1, 6, 1, 2 }, 1, KIND_TABLE,  H_LLDPPORTADMIN },
+	{ 2, { 3, 1 },       1, KIND_SCALAR, H_LLDPCHASSISSUBTYPE },
+	{ 2, { 3, 2 },       1, KIND_SCALAR, H_LLDPCHASSISID },
+	{ 2, { 3, 3 },       1, KIND_SCALAR, H_LLDPSYSNAME },
+	{ 2, { 3, 4 },       1, KIND_SCALAR, H_LLDPSYSDESC },
+	/* MIB-II, 1.3.6.1.2.1.* */
+	{ 2, { 1, 1 },       0, KIND_SCALAR, H_SYSDESCR },
+	{ 2, { 1, 2 },       0, KIND_SCALAR, H_SYSOBJID },
+	{ 2, { 1, 3 },       0, KIND_SCALAR, H_SYSUPTIME },
+	{ 2, { 1, 4 },       0, KIND_SCALAR, H_SYSCONTACT },
+	{ 2, { 1, 5 },       0, KIND_SCALAR, H_SYSNAME },
+	{ 2, { 1, 6 },       0, KIND_SCALAR, H_SYSLOCATION },
+	{ 2, { 1, 7 },       0, KIND_SCALAR, H_SYSSERVICES },
+	{ 2, { 2, 1 },       0, KIND_SCALAR, H_IFNUMBER },
+	{ 4, { 2, 2, 1, 1 }, 0, KIND_TABLE,  H_IFINDEX },
+	{ 4, { 2, 2, 1, 2 }, 0, KIND_TABLE,  H_IFDESCR },
+	{ 4, { 2, 2, 1, 3 }, 0, KIND_TABLE,  H_IFTYPE },
+	{ 4, { 2, 2, 1, 4 }, 0, KIND_TABLE,  H_IFMTU },
+	{ 4, { 2, 2, 1, 5 }, 0, KIND_TABLE,  H_IFSPEED },
+	{ 4, { 2, 2, 1, 6 }, 0, KIND_TABLE,  H_IFPHYS },
+	{ 4, { 2, 2, 1, 7 }, 0, KIND_TABLE,  H_IFADMIN },
+	{ 4, { 2, 2, 1, 8 }, 0, KIND_TABLE,  H_IFOPER },
+	{ 4, { 2, 2, 1, 10 }, 0, KIND_TABLE, H_IFINOCTETS },
+	{ 4, { 2, 2, 1, 11 }, 0, KIND_TABLE, H_IFINUCAST },
+	{ 4, { 2, 2, 1, 14 }, 0, KIND_TABLE, H_IFINERR },
+	{ 4, { 2, 2, 1, 16 }, 0, KIND_TABLE, H_IFOUTOCTETS },
+	{ 4, { 2, 2, 1, 17 }, 0, KIND_TABLE, H_IFOUTUCAST },
+	{ 4, { 2, 2, 1, 20 }, 0, KIND_TABLE, H_IFOUTERR },
+	/* ipNetToMediaTable (.4.22.1): the ARP cache. Real INDEX is
+	 * { ifIndex, ipNetToMediaNetAddress }; we index by ARP slot
+	 * number instead (see KIND_ARPTABLE) and report a constant
 	 * ifIndex, since entries here are not tied to a physical port -
 	 * see doc/snmp.md. */
-	{ 4, { 4, 22, 1, 1 }, KIND_ARPTABLE, H_ARPIFINDEX },
-	{ 4, { 4, 22, 1, 2 }, KIND_ARPTABLE, H_ARPPHYSADDR },
-	{ 4, { 4, 22, 1, 3 }, KIND_ARPTABLE, H_ARPNETADDR },
-	{ 4, { 4, 22, 1, 4 }, KIND_ARPTABLE, H_ARPTYPE },
+	{ 4, { 4, 22, 1, 1 }, 0, KIND_ARPTABLE, H_ARPIFINDEX },
+	{ 4, { 4, 22, 1, 2 }, 0, KIND_ARPTABLE, H_ARPPHYSADDR },
+	{ 4, { 4, 22, 1, 3 }, 0, KIND_ARPTABLE, H_ARPNETADDR },
+	{ 4, { 4, 22, 1, 4 }, 0, KIND_ARPTABLE, H_ARPTYPE },
+	/* dot1dTpFdbTable (BRIDGE-MIB, .17.4.3.1): the L2/FDB table.
+	 * Real INDEX is dot1dTpFdbAddress (the MAC itself); we index by
+	 * raw ASIC hash-table slot instead and report the MAC as a
+	 * value column - see doc/snmp.md. */
+	{ 5, { 17, 4, 3, 1, 1 }, 0, KIND_FDBTABLE, H_FDBADDR },
+	{ 5, { 17, 4, 3, 1, 2 }, 0, KIND_FDBTABLE, H_FDBPORT },
+	{ 5, { 17, 4, 3, 1, 3 }, 0, KIND_FDBTABLE, H_FDBSTATUS },
+	/* ifXTable (.31.1.1.1): just the two columns worth the extra
+	 * code size - ifName and ifHighSpeed. No 64-bit HC counters:
+	 * there is no real 64-bit source data behind them, same as
+	 * ifInOctets/ifOutOctets above. */
+	{ 5, { 31, 1, 1, 1, 1 },  0, KIND_TABLE, H_IFNAME },
+	{ 5, { 31, 1, 1, 1, 15 }, 0, KIND_TABLE, H_IFHIGHSPEED },
 };
 #define MIB_TABLE_LEN (sizeof(mib_table) / sizeof(mib_table[0]))
 
 /* Fixed prefix subids for MIB-II: 1.3.6.1.2.1
  * (the 1.3 collapses to 0x2b in BER, handled separately). */
-static __code const uint8_t mib_prefix[] = { 1, 3, 6, 1, 2, 1 };
+static __code const uint16_t mib_prefix[] = { 1, 3, 6, 1, 2, 1 };
 #define MIB_PREFIX_LEN 6
+
+/* Fixed prefix for the LLDP-MIB's lldpObjects node: iso.std.iso8802.
+ * ieee802dot1.ieee802dot1mibs.lldpMIB.lldpObjects. "8802" needs the
+ * 2-byte BER subid form - see ber_read_oid()/put_oid_bytes(). */
+static __code const uint16_t lldp_prefix[] = { 1, 0, 8802, 1, 1, 2, 1 };
+#define LLDP_PREFIX_LEN 7
+
+/* Selects a node's absolute OID prefix (mib_prefix or lldp_prefix). */
+static uint16_t prefix_at(__code const struct mib_node *n, uint8_t i)
+{
+	return n->prefix_id ? lldp_prefix[i] : mib_prefix[i];
+}
+static uint8_t prefix_len(__code const struct mib_node *n)
+{
+	return n->prefix_id ? LLDP_PREFIX_LEN : MIB_PREFIX_LEN;
+}
 
 /* sysObjectID.0 value for the playground. Under IANA experimental
  * (1.3.6.1.3) so no enterprise-number registration is required. */
@@ -210,6 +274,72 @@ static uint8_t arp_row_used(uint8_t row)
 }
 
 /*
+ * ---- L2/FDB table (BRIDGE-MIB dot1dTpFdbTable) -------------------------
+ */
+
+/* Raw ASIC L2 hash-table index domain: 0..4095 (12 bits). */
+#define FDB_IDX_MAX 4095
+
+static __xdata uint16_t fd_found;
+static __xdata uint8_t fd_mac[6];
+static __xdata uint8_t fd_port;
+static __xdata uint8_t fd_static;
+
+/* Read the first valid L2 entry at or after raw hw index `from`, using
+ * the same ASIC "read next" primitive as send_l2()/l2_delete() in
+ * httpd/page_impl.c (TBL_LUTREAD_NEXT_L2UC: returns the closest valid
+ * entry >= the given index, not necessarily AT it). On success fills
+ * fd_found/fd_mac/fd_port/fd_static and returns 1; returns 0 if no
+ * valid entry exists at or after `from`. */
+static uint8_t fdb_read_at_or_after(uint16_t from)
+{
+	do {
+		reg_read_m(RTL837X_TBL_CTRL);
+	} while (sfr_data[3] & TBL_EXECUTE);
+
+	reg_read_m(RTL837x_TBL_DATA_0);
+	REG_WRITE(RTL837x_TBL_DATA_0, sfr_data[0], sfr_data[1] & 0xfc,
+		  sfr_data[2] | (TBL_LUTREAD_NEXT_L2UC << 6), sfr_data[3]);
+	REG_WRITE(RTL837X_TBL_CTRL, from >> 8, from, TBL_L2_UNICAST, TBL_EXECUTE);
+	do {
+		reg_read_m(RTL837X_TBL_CTRL);
+	} while (sfr_data[3] & TBL_EXECUTE);
+
+	reg_read_m(RTL837x_L2_DATA_OUT_B);
+	if (!(sfr_data[0] & 0x20))
+		return 0;	/* no valid entry from `from` onward */
+
+	fd_mac[0] = sfr_data[2];
+	fd_mac[1] = sfr_data[3];
+	fd_port = (sfr_data[0] >> 6) & 0x3;
+
+	reg_read_m(RTL837x_L2_DATA_OUT_A);
+	fd_mac[2] = sfr_data[0];
+	fd_mac[3] = sfr_data[1];
+	fd_mac[4] = sfr_data[2];
+	fd_mac[5] = sfr_data[3];
+
+	reg_read_m(RTL837x_L2_DATA_OUT_C);
+	fd_static = sfr_data[1] & 0x1;
+	fd_port |= (sfr_data[3] & 0x3) << 2;
+
+	reg_read_m(RTL837x_TBL_DATA_0);
+	fd_found = (((uint16_t)sfr_data[2] & 0x0f) << 8) | sfr_data[3];
+	return 1;
+}
+
+/* Convert the L2 table's raw port number (same domain as
+ * machine.log_to_phys_port[]'s input) into this agent's ifIndex
+ * numbering. LAG membership is not resolved - a LAG member port is
+ * reported as its own ifIndex, matching /l2.json's "port" field. */
+static uint8_t fdb_port_ifindex(uint8_t hw_port)
+{
+	if (hw_port < machine.min_port || hw_port > machine.max_port)
+		return 0;
+	return hw_port - machine.min_port + 1;
+}
+
+/*
  * ---- BER decoder helpers -----------------------------------------------
  */
 
@@ -222,7 +352,7 @@ static uint8_t arp_row_used(uint8_t row)
 __xdata uint16_t ber_l;
 __xdata uint32_t ber_iv;
 __xdata uint8_t ber_inst;
-__xdata uint8_t snmp_inst;
+__xdata uint16_t snmp_inst;
 
 /* Parse a BER length starting at buf[*pos]. Advances *pos past the
  * length header and stores the value in *out. Returns 0 on error. */
@@ -268,8 +398,10 @@ static uint8_t ber_read_int(__xdata uint8_t *buf, __xdata uint16_t *pos,
 }
 
 /* Decode a BER OID into snmp_oid[]. Advances *pos.
- * All subids in the served MIB fit in 7 bits so we reject anything
- * bigger to keep the on-wire comparison simple. */
+ * Subids are BER's standard 7-bit-per-byte varint (continuation bit
+ * set on all but the last byte); we accept up to 2 encoded bytes per
+ * subid (14 bits, max 16383) - enough for every subid in the served
+ * MIB, including the LLDP-MIB prefix's "8802". */
 static uint8_t ber_read_oid(__xdata uint8_t *buf, __xdata uint16_t *pos,
 			    uint16_t end)
 {
@@ -283,18 +415,25 @@ static uint8_t ber_read_oid(__xdata uint8_t *buf, __xdata uint16_t *pos,
 	uint16_t stop = *pos + ber_l;
 	uint8_t n = 0;
 	/* First byte encodes two subids: 40*a + b (a in 0..2, b < 40 when
-	 * a < 2, otherwise unbounded). We only expect 0x2b (1.3) here. */
+	 * a < 2, otherwise unbounded). We expect 0x2b (1.3, mib-2) or
+	 * 0x28 (1.0, LLDP-MIB) here. */
 	uint8_t first = buf[(*pos)++];
 	snmp_oid[n++] = first / 40;
 	snmp_oid[n++] = first % 40;
 	while (*pos < stop) {
-		uint8_t b = buf[(*pos)++];
-		/* Reject multi-byte varints - MIB-II subids fit in 7 bits. */
-		if (b & 0x80)
-			return 0;
+		uint16_t v = 0;
+		uint8_t b, nbytes = 0;
+		do {
+			/* Reject a subid needing more than 2 encoded bytes. */
+			if (*pos >= stop || nbytes >= 2)
+				return 0;
+			b = buf[(*pos)++];
+			v = (v << 7) | (b & 0x7f);
+			nbytes++;
+		} while (b & 0x80);
 		if (n >= SNMP_OID_MAX)
 			return 0;
-		snmp_oid[n++] = b;
+		snmp_oid[n++] = v;
 	}
 	snmp_oid_len = n;
 	return 1;
@@ -307,26 +446,28 @@ static uint8_t ber_read_oid(__xdata uint8_t *buf, __xdata uint16_t *pos,
 /* Shared scratch for the walk/compare helpers - see snmp_process for
  * why these are module-scope in __xdata. */
 static __xdata uint8_t lk_i, lk_k, lk_p, lk_np;
+static __xdata uint16_t lk_plen, lk_base, lk_target, lk_start;
 static __xdata int8_t lk_c;
-static __xdata uint8_t oc_a_len, oc_i, oc_cand;
+static __xdata uint16_t oc_a_len, oc_i, oc_cand, oc_plen;
 
-/* Compare snmp_oid[] against the prefix + a MIB node's suffix + a
- * trailing instance byte (either 0 or ifIndex). Returns:
+/* Compare snmp_oid[] against a MIB node's prefix + suffix + a
+ * trailing instance (either 0 or a row instance). Returns:
  *   -1 if snmp_oid < candidate
  *    0 if equal
  *   +1 if snmp_oid > candidate
  */
 static int8_t oid_cmp_candidate(__code const struct mib_node *n,
-				uint8_t inst)
+				uint16_t inst)
 {
-	oc_a_len = MIB_PREFIX_LEN + n->suffix_len + 1;
+	oc_plen = prefix_len(n);
+	oc_a_len = oc_plen + n->suffix_len + 1;
 	for (oc_i = 0; oc_i < oc_a_len; oc_i++) {
 		if (oc_i >= snmp_oid_len)
 			return -1;
-		if (oc_i < MIB_PREFIX_LEN)
-			oc_cand = mib_prefix[oc_i];
-		else if (oc_i < MIB_PREFIX_LEN + n->suffix_len)
-			oc_cand = n->suffix[oc_i - MIB_PREFIX_LEN];
+		if (oc_i < oc_plen)
+			oc_cand = prefix_at(n, (uint8_t)oc_i);
+		else if (oc_i < oc_plen + n->suffix_len)
+			oc_cand = n->suffix[oc_i - oc_plen];
 		else
 			oc_cand = inst;
 		if (snmp_oid[oc_i] < oc_cand)
@@ -339,11 +480,31 @@ static int8_t oid_cmp_candidate(__code const struct mib_node *n,
 	return 0;
 }
 
-/* Look up an exact GET target. On success returns the handler id and
- * fills *inst with the trailing ifIndex (or 0 for scalars). */
-static uint8_t mib_lookup(__xdata uint8_t *inst)
+/* Same as oid_cmp_candidate() but without a trailing instance -
+ * compares only the node's own prefix + suffix. Used by KIND_FDBTABLE
+ * to tell whether the target OID falls before, inside, or after this
+ * column without looping over its (up to 4096-wide) instance range. */
+static int8_t oid_cmp_column(__code const struct mib_node *n)
 {
-	lk_np = n_ports();
+	oc_plen = prefix_len(n);
+	oc_a_len = oc_plen + n->suffix_len;
+	for (oc_i = 0; oc_i < oc_a_len; oc_i++) {
+		if (oc_i >= snmp_oid_len)
+			return -1;
+		oc_cand = (oc_i < oc_plen) ? prefix_at(n, (uint8_t)oc_i) :
+					     n->suffix[oc_i - oc_plen];
+		if (snmp_oid[oc_i] < oc_cand)
+			return -1;
+		if (snmp_oid[oc_i] > oc_cand)
+			return 1;
+	}
+	return 0;
+}
+
+/* Look up an exact GET target. On success returns the handler id and
+ * fills *inst with the trailing row instance (or 0 for scalars). */
+static uint8_t mib_lookup(__xdata uint16_t *inst)
+{
 	for (lk_i = 0; lk_i < MIB_TABLE_LEN; lk_i++) {
 		if (mib_table[lk_i].kind == KIND_SCALAR) {
 			if (oid_cmp_candidate(&mib_table[lk_i], 0) == 0) {
@@ -352,11 +513,27 @@ static uint8_t mib_lookup(__xdata uint8_t *inst)
 			}
 			continue;
 		}
+		if (mib_table[lk_i].kind == KIND_FDBTABLE) {
+			lk_plen = prefix_len(&mib_table[lk_i]);
+			lk_base = lk_plen + mib_table[lk_i].suffix_len;
+			if (snmp_oid_len != lk_base + 1 ||
+			    oid_cmp_column(&mib_table[lk_i]) != 0)
+				continue;
+			lk_target = snmp_oid[lk_base];
+			if (lk_target < 1 || lk_target > FDB_IDX_MAX + 1)
+				continue;
+			if (fdb_read_at_or_after(lk_target - 1) &&
+			    fd_found == lk_target - 1) {
+				*inst = lk_target;
+				return mib_table[lk_i].handler;
+			}
+			continue;
+		}
 		/* Table column: iterate the row instance 1..np (ifIndex, or
 		 * ARP slot number for KIND_ARPTABLE). */
 		lk_np = (mib_table[lk_i].kind == KIND_ARPTABLE) ?
 			UIP_ARPTAB_SIZE : n_ports();
-		lk_k = MIB_PREFIX_LEN + mib_table[lk_i].suffix_len;
+		lk_k = prefix_len(&mib_table[lk_i]) + mib_table[lk_i].suffix_len;
 		if (snmp_oid_len != lk_k + 1)
 			continue;
 		/* Fast prefix check to skip whole rows. */
@@ -378,28 +555,55 @@ static uint8_t mib_lookup(__xdata uint8_t *inst)
 /* Compute the OID immediately following snmp_oid[] in the served MIB.
  * On success updates snmp_oid[] to the found OID, sets *inst and
  * returns the handler id. Returns 0 when we walked off the end. */
-static uint8_t mib_get_next(__xdata uint8_t *inst)
+static uint8_t mib_get_next(__xdata uint16_t *inst)
 {
-	lk_np = n_ports();
 	for (lk_i = 0; lk_i < MIB_TABLE_LEN; lk_i++) {
 		if (mib_table[lk_i].kind == KIND_SCALAR) {
 			lk_c = oid_cmp_candidate(&mib_table[lk_i], 0);
 			if (lk_c < 0) {
-				for (lk_k = 0; lk_k < MIB_PREFIX_LEN; lk_k++)
-					snmp_oid[lk_k] = mib_prefix[lk_k];
+				lk_plen = prefix_len(&mib_table[lk_i]);
+				for (lk_k = 0; lk_k < lk_plen; lk_k++)
+					snmp_oid[lk_k] = prefix_at(&mib_table[lk_i], lk_k);
 				for (lk_k = 0;
 				     lk_k < mib_table[lk_i].suffix_len;
 				     lk_k++)
-					snmp_oid[MIB_PREFIX_LEN + lk_k] =
+					snmp_oid[lk_plen + lk_k] =
 						mib_table[lk_i].suffix[lk_k];
-				snmp_oid[MIB_PREFIX_LEN +
+				snmp_oid[lk_plen +
 					 mib_table[lk_i].suffix_len] = 0;
-				snmp_oid_len = MIB_PREFIX_LEN +
+				snmp_oid_len = lk_plen +
 					mib_table[lk_i].suffix_len + 1;
 				*inst = 0;
 				return mib_table[lk_i].handler;
 			}
 			continue;
+		}
+		if (mib_table[lk_i].kind == KIND_FDBTABLE) {
+			lk_plen = prefix_len(&mib_table[lk_i]);
+			lk_base = lk_plen + mib_table[lk_i].suffix_len;
+			lk_c = oid_cmp_column(&mib_table[lk_i]);
+			if (lk_c > 0)
+				continue;	/* target sorts after this column */
+			if (lk_c < 0 || snmp_oid_len <= lk_base) {
+				lk_start = 0;	/* fresh walk into this column */
+			} else if (snmp_oid_len == lk_base + 1) {
+				/* snmp_oid[lk_base] is the previous instance
+				 * (1-based); that already equals the next hw
+				 * idx to search from (instance = hw idx + 1). */
+				lk_start = snmp_oid[lk_base];
+			} else {
+				continue;	/* OID too deep for a single instance */
+			}
+			if (lk_start > FDB_IDX_MAX || !fdb_read_at_or_after(lk_start))
+				continue;
+			for (lk_k = 0; lk_k < lk_plen; lk_k++)
+				snmp_oid[lk_k] = prefix_at(&mib_table[lk_i], lk_k);
+			for (lk_k = 0; lk_k < mib_table[lk_i].suffix_len; lk_k++)
+				snmp_oid[lk_plen + lk_k] = mib_table[lk_i].suffix[lk_k];
+			snmp_oid[lk_base] = fd_found + 1;
+			snmp_oid_len = lk_base + 1;
+			*inst = fd_found + 1;
+			return mib_table[lk_i].handler;
 		}
 		/* Table column: find first instance whose OID is strictly
 		 * greater than the target. */
@@ -411,16 +615,17 @@ static uint8_t mib_get_next(__xdata uint8_t *inst)
 				continue;
 			lk_c = oid_cmp_candidate(&mib_table[lk_i], lk_p);
 			if (lk_c < 0) {
-				for (lk_k = 0; lk_k < MIB_PREFIX_LEN; lk_k++)
-					snmp_oid[lk_k] = mib_prefix[lk_k];
+				lk_plen = prefix_len(&mib_table[lk_i]);
+				for (lk_k = 0; lk_k < lk_plen; lk_k++)
+					snmp_oid[lk_k] = prefix_at(&mib_table[lk_i], lk_k);
 				for (lk_k = 0;
 				     lk_k < mib_table[lk_i].suffix_len;
 				     lk_k++)
-					snmp_oid[MIB_PREFIX_LEN + lk_k] =
+					snmp_oid[lk_plen + lk_k] =
 						mib_table[lk_i].suffix[lk_k];
-				snmp_oid[MIB_PREFIX_LEN +
+				snmp_oid[lk_plen +
 					 mib_table[lk_i].suffix_len] = lk_p;
-				snmp_oid_len = MIB_PREFIX_LEN +
+				snmp_oid_len = lk_plen +
 					mib_table[lk_i].suffix_len + 1;
 				*inst = lk_p;
 				return mib_table[lk_i].handler;
@@ -435,8 +640,9 @@ static uint8_t mib_get_next(__xdata uint8_t *inst)
  */
 
 /* Return current link speed for a logical port encoded as bits/s.
- * Speeds beyond 4 Gbit/s are capped to UINT32_MAX; ifHighSpeed is
- * not exposed. Returns 0 when link is down. */
+ * Speeds beyond 4 Gbit/s are capped to UINT32_MAX for ifSpeed
+ * (Gauge32); see port_link_speed_mbps() for the uncapped value used
+ * by ifHighSpeed. Returns 0 when link is down. */
 static uint32_t port_link_speed(uint8_t log_port)
 {
 	uint8_t b;
@@ -467,6 +673,37 @@ static uint8_t port_link_up(uint8_t log_port)
 {
 	reg_read_m(RTL837X_REG_LINKS_STS);
 	return (sfr_data[(log_port / 8) + 1] >> (log_port % 8)) & 1;
+}
+
+/* Link speed in Mbit/s, for ifHighSpeed (Gauge32): unlike
+ * port_link_speed(), not capped at UINT32_MAX/1e6 for 5G/10G links,
+ * since ifHighSpeed exists specifically to represent those correctly.
+ * Duplicates port_link_speed()'s register reads rather than deriving
+ * from its (lossy, for these speeds) bits/s return value. */
+static uint32_t port_link_speed_mbps(uint8_t log_port)
+{
+	uint8_t b;
+
+	reg_read_m(RTL837X_REG_LINKS_STS);
+	if (!((sfr_data[(log_port / 8) + 1] >> (log_port % 8)) & 1))
+		return 0;
+
+	if (log_port < 8)
+		reg_read_m(RTL837X_REG_LINKS);
+	else
+		reg_read_m(RTL837X_REG_LINKS_89);
+	b = sfr_data[3 - ((log_port & 7) >> 1)];
+	b = (log_port & 1) ? b >> 4 : b & 0xf;
+
+	switch (b) {
+	case 0: return 10;
+	case 1: return 100;
+	case 2: return 1000;
+	case 4: return 10000;
+	case 5: return 2500;
+	case 6: return 5000;
+	default: return 0;
+	}
 }
 
 /* Read a 32-bit port statistic counter. */
@@ -508,16 +745,25 @@ static uint8_t put_uint(__xdata uint8_t *p, uint32_t v)
 	return n;
 }
 
-/* Encode a BER OID content (without tag/length). Returns length. */
-static uint8_t put_oid_bytes(__xdata uint8_t *p, __xdata const uint8_t *sub,
+/* Encode a BER OID content (without tag/length). sub[] holds logical
+ * subid values (snmp_oid[]'s type); a subid >= 128 (e.g. the LLDP-MIB
+ * prefix's "8802") is emitted as BER's standard 2-byte 7-bit varint,
+ * matching what ber_read_oid() decodes. Returns length. */
+static uint8_t put_oid_bytes(__xdata uint8_t *p, __xdata const uint16_t *sub,
 			     uint8_t n)
 {
 	if (n < 2)
 		return 0;
 	p[0] = sub[0] * 40 + sub[1];
 	uint8_t i, o = 1;
-	for (i = 2; i < n; i++)
-		p[o++] = sub[i];
+	for (i = 2; i < n; i++) {
+		if (sub[i] >= 128) {
+			p[o++] = 0x80 | (sub[i] >> 7);
+			p[o++] = sub[i] & 0x7f;
+		} else {
+			p[o++] = (uint8_t)sub[i];
+		}
+	}
 	return o;
 }
 
@@ -560,8 +806,9 @@ static uint16_t put_xstr(__xdata uint8_t *p, __xdata const char *s)
  * ---- Value encoders ----------------------------------------------------
  *
  * Each encoder writes the full TLV (tag + length + value) for one MIB
- * leaf and returns the number of bytes written. `inst` is the ifIndex
- * for table columns and unused for scalars.
+ * leaf and returns the number of bytes written. `inst` is the row
+ * instance for table columns (an ifIndex, ARP slot, or FDB slot+1
+ * depending on the column) and unused for scalars.
  *
  * Locals live at module scope in __xdata for the same overlay
  * exhaustion reason discussed above snmp_process().
@@ -572,7 +819,7 @@ static __xdata uint8_t * __xdata ev_v;
 static __xdata uint32_t ev_u32;
 static __xdata uint8_t ev_log, ev_phys, ev_i;
 
-static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint8_t inst)
+static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint16_t inst)
 {
 	ev_vlen = 0;
 	ev_tag = BER_OCTET_STR;
@@ -617,7 +864,7 @@ static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint8_t inst)
 		ev_vlen = put_uint(ev_v, inst);
 		break;
 	case H_IFDESCR:
-		ev_phys = ifindex_phys(inst);
+		ev_phys = ifindex_phys((uint8_t)inst);
 		ev_vlen = put_cstr(ev_v, "port ");
 		if (ev_phys >= 10)
 			ev_v[ev_vlen++] = '0' + (ev_phys / 10);
@@ -633,7 +880,7 @@ static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint8_t inst)
 		break;
 	case H_IFSPEED:
 		ev_tag = BER_GAUGE32;
-		ev_log = ifindex_log(inst);
+		ev_log = ifindex_log((uint8_t)inst);
 		ev_vlen = put_uint(ev_v, port_link_speed(ev_log));
 		break;
 	case H_IFPHYS:
@@ -647,7 +894,7 @@ static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint8_t inst)
 		break;
 	case H_IFOPER:
 		ev_tag = BER_INTEGER;
-		ev_log = ifindex_log(inst);
+		ev_log = ifindex_log((uint8_t)inst);
 		ev_vlen = put_uint(ev_v, port_link_up(ev_log) ? 1 : 2);
 		break;
 	case H_IFINOCTETS:
@@ -656,7 +903,7 @@ static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint8_t inst)
 		/* No direct byte counter available; report packet count
 		 * for the moment. Tools tolerate the value as long as it
 		 * only grows. */
-		ev_log = ifindex_log(inst);
+		ev_log = ifindex_log((uint8_t)inst);
 		ev_u32 = port_counter(ev_log, handler == H_IFINOCTETS ?
 				      STAT_COUNTER_RX_PKTS :
 				      STAT_COUNTER_TX_PKTS);
@@ -664,20 +911,20 @@ static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint8_t inst)
 		break;
 	case H_IFINUCAST:
 		ev_tag = BER_COUNTER32;
-		ev_log = ifindex_log(inst);
+		ev_log = ifindex_log((uint8_t)inst);
 		ev_vlen = put_uint(ev_v,
 				   port_counter(ev_log, STAT_COUNTER_RX_PKTS));
 		break;
 	case H_IFOUTUCAST:
 		ev_tag = BER_COUNTER32;
-		ev_log = ifindex_log(inst);
+		ev_log = ifindex_log((uint8_t)inst);
 		ev_vlen = put_uint(ev_v,
 				   port_counter(ev_log, STAT_COUNTER_TX_PKTS));
 		break;
 	case H_IFINERR:
 	case H_IFOUTERR:
 		ev_tag = BER_COUNTER32;
-		ev_log = ifindex_log(inst);
+		ev_log = ifindex_log((uint8_t)inst);
 		ev_vlen = put_uint(ev_v,
 				   port_counter(ev_log, STAT_COUNTER_ERR_PKTS));
 		break;
@@ -706,6 +953,56 @@ static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint8_t inst)
 	case H_ARPTYPE:
 		ev_tag = BER_INTEGER;
 		ev_vlen = put_uint(ev_v, 3);	/* dynamic */
+		break;
+	case H_IFNAME:
+		ev_vlen = put_xstr(ev_v, port_names[ifindex_log((uint8_t)inst)]);
+		break;
+	case H_IFHIGHSPEED:
+		ev_tag = BER_GAUGE32;
+		ev_log = ifindex_log((uint8_t)inst);
+		ev_vlen = put_uint(ev_v, port_link_speed_mbps(ev_log));
+		break;
+	case H_FDBADDR:
+		fdb_read_at_or_after(inst - 1);
+		for (ev_i = 0; ev_i < 6; ev_i++)
+			ev_v[ev_i] = fd_mac[ev_i];
+		ev_vlen = 6;
+		break;
+	case H_FDBPORT:
+		ev_tag = BER_INTEGER;
+		fdb_read_at_or_after(inst - 1);
+		ev_vlen = put_uint(ev_v, fdb_port_ifindex(fd_port));
+		break;
+	case H_FDBSTATUS:
+		ev_tag = BER_INTEGER;
+		fdb_read_at_or_after(inst - 1);
+		/* dot1dTpFdbStatus: learned(3) for dynamically-learned
+		 * entries, mgmt(5) for statically configured ones. */
+		ev_vlen = put_uint(ev_v, fd_static ? 5 : 3);
+		break;
+	case H_LLDPPORTADMIN:
+		ev_tag = BER_INTEGER;
+		ev_log = ifindex_log((uint8_t)inst);
+		/* txOnly(3)/disabled(4): this agent never processes
+		 * received LLDP frames, so rxOnly/txAndRx never apply. */
+		ev_vlen = put_uint(ev_v,
+			(lldp_enabled && ((1 << machine.log_to_phys_port[ev_log]) &
+					  lldp_physical_port_status)) ? 3 : 4);
+		break;
+	case H_LLDPCHASSISSUBTYPE:
+		ev_tag = BER_INTEGER;
+		ev_vlen = put_uint(ev_v, 4);	/* macAddress */
+		break;
+	case H_LLDPCHASSISID:
+		for (ev_i = 0; ev_i < 6; ev_i++)
+			ev_v[ev_i] = uip_ethaddr.addr[ev_i];
+		ev_vlen = 6;
+		break;
+	case H_LLDPSYSNAME:
+		ev_vlen = put_xstr(ev_v, hostname);
+		break;
+	case H_LLDPSYSDESC:
+		ev_vlen = put_cstr(ev_v, machine.machine_name);
 		break;
 	default:
 		/* Should never happen; encode an empty octet string. */
@@ -737,7 +1034,7 @@ static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint8_t inst)
 static __xdata uint8_t evb_oid_len;
 static __xdata uint16_t evb_used;
 static uint16_t emit_varbind(__xdata uint8_t *buf, uint8_t handler,
-			     uint8_t inst)
+			     uint16_t inst)
 {
 	/* Reserve 4 bytes at the start for SEQ tag + 3-byte length so
 	 * that the header size is known regardless of total length. */
