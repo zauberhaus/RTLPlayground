@@ -122,8 +122,19 @@ struct flash_region_t {
     uint16_t len;
 };
 
+/* One uIP ARP cache slot. ipaddr[0]==ipaddr[1]==0 marks an empty slot. */
+struct arp_entry {
+	uint16_t ipaddr[2];
+	struct uip_eth_addr ethaddr;
+	uint8_t time;
+};
+
 extern __xdata char port_names[9][PORT_NAME_SIZE];
 extern __xdata uint16_t lldp_physical_port_status;
+/* Mirrors UIP_ARPTAB_SIZE (uip/uipopt.h), hardcoded here like
+ * port_names[9] above: uipopt.h cannot be included this early without
+ * a circular dependency (uipopt.h -> uip-conf.h -> httpd.h -> this file). */
+extern __xdata struct arp_entry arp_table[8];
 
 extern __xdata bool stp_enabled;
 

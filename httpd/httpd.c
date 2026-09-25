@@ -1066,6 +1066,8 @@ void httpd_appcall(void)
 				send_stp();
 			} else if (is_word(q, "/lldp.json")) {
 				send_lldp();
+			} else if (is_word(q, "/snmp.json")) {
+				send_snmp();
 			} else if (is_word(q, "/vlanlist")) {
 				send_vlanlist();
 			} else if (is_word(q, "/config")) {

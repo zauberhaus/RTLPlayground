@@ -70,6 +70,30 @@ int uploaded_config_len;
 const char *session = NULL;
 bool authenticated = false;
 
+/* Mock SNMP running state, mutated by POST /cmd below so the SNMP page
+ * reflects what was actually applied instead of a fixed snapshot. */
+bool snmp_enabled = true;
+char snmp_community[16] = "public";
+char snmp_contact[32] = "";
+char snmp_location[32] = "";
+
+/* Interpret the handful of commands the UI needs live feedback for.
+ * Everything else is accepted (see the POST /cmd handler) but has no
+ * effect on the mock's state. */
+void handle_cmd(const char *cmd)
+{
+	if (!strncmp(cmd, "snmp on", 7))
+		snmp_enabled = true;
+	else if (!strncmp(cmd, "snmp off", 8))
+		snmp_enabled = false;
+	else if (!strncmp(cmd, "snmp community ", 15))
+		snprintf(snmp_community, sizeof(snmp_community), "%s", cmd + 15);
+	else if (!strncmp(cmd, "snmp contact ", 13))
+		snprintf(snmp_contact, sizeof(snmp_contact), "%s", cmd + 13);
+	else if (!strncmp(cmd, "snmp location ", 14))
+		snprintf(snmp_location, sizeof(snmp_location), "%s", cmd + 14);
+}
+
 char is_word(char *c, char *d)
 {
 	uint8_t i = 0;
@@ -465,6 +489,20 @@ void send_lldp(int s)
 	write(s, body, strlen(body));
 }
 
+void send_snmp(int s)
+{
+	char *header = "HTTP/1.1 200 OK\r\n"
+	                 "Content-Type: application/json; charset=UTF-8\r\n\r\n";
+	char body[160];
+
+	snprintf(body, sizeof(body),
+		 "{\"on\": %s, \"community\":\"%s\", \"contact\":\"%s\", \"location\":\"%s\"}",
+		 snmp_enabled ? "true" : "false", snmp_community, snmp_contact, snmp_location);
+
+	write(s, header, strlen(header));
+	write(s, body, strlen(body));
+}
+
 void send_cmd_log(int s)
 {
         char *header = "HTTP/1.1 200 OK\r\n"
@@ -717,6 +755,13 @@ void launch(struct Server *server)
 					else
 						send_lldp(new_socket);
 					goto done;
+				} else if (!strncmp(&buffer[4], "/snmp.json", 10)) {
+					printf("SNMP request");
+					if (!authenticated)
+						send_unauthorized(new_socket);
+					else
+						send_snmp(new_socket);
+					goto done;
 				} else if (!strncmp(&buffer[4], "/cmd_log", 8)) {
 					printf("Request cmd_log\n");
 					if (!authenticated)
@@ -806,6 +851,7 @@ void launch(struct Server *server)
 					printf("POST cmd\n");
 					printf("CMD: %s\n", p + 4);
 					strcpy(cmd_history[cmd_ptr], p + 4);
+					handle_cmd(cmd_history[cmd_ptr]);
 					cmd_ptr++;
 					print_cmd_history();
 					char *response = "HTTP/1.1 200 OK\r\n"
@@ -821,6 +867,7 @@ void launch(struct Server *server)
 					char *response;
 					if (is_word(p, PASSWORD)) {
 						printf("Password accepted!\n");
+						last_session_use = time(NULL);
 						response = "HTTP/1.1 302 Found\r\n"
 							   "Location: index.html\r\n"
 							   "Set-Cookie: session=" SESSION_ID "; Path=/; SameSite=Strict\r\n"

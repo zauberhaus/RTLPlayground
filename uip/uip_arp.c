@@ -114,17 +114,14 @@ struct ethip_hdr {
 
 #define ARP_HWTYPE_ETH 1
 
-struct arp_entry {
-  u16_t ipaddr[2];
-  struct uip_eth_addr ethaddr;
-  u8_t time;
-};
+/* struct arp_entry lives in rtl837x_common.h: the SNMP agent (snmp.c)
+ * reads arp_table directly to serve ipNetToMediaTable. */
 
 static __code const struct uip_eth_addr broadcast_ethaddr =
   {{0xff,0xff,0xff,0xff,0xff,0xff}};
 static __code const u16_t broadcast_ipaddr[2] = {0xffff,0xffff};
 
-static __xdata struct arp_entry arp_table[UIP_ARPTAB_SIZE];
+__xdata struct arp_entry arp_table[UIP_ARPTAB_SIZE];
 static __xdata u16_t ipaddr[2];
 static __xdata u8_t i, c;
 

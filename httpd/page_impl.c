@@ -50,9 +50,6 @@ extern __xdata uint8_t sfp_options[2];
 extern __xdata uint16_t lldp_physical_port_status;
 extern __xdata bool lldp_enabled;
 
-extern __xdata uint16_t lldp_physical_port_status;
-extern __xdata bool lldp_enabled;
-
 __code const uint8_t * __code const HTTP_RESPONCE_JSON = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n";
 __code const uint8_t * __code const HTTP_RESPONCE_TXT = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n";
 
@@ -730,7 +727,6 @@ void send_lldp(void)
 
 	slen += strtox(outbuf + slen, "]}");
 }
-
 
 
 void send_eee(void)

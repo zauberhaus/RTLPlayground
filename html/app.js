@@ -3,7 +3,7 @@ var LANG={
 en:{
 nav_dash:"Dashboard",nav_ports:"Ports",nav_stp:"Spanning tree",nav_stats:"Statistics",
 nav_vlan:"VLANs",nav_l2:"MAC table",nav_mirror:"Mirroring",nav_lag:"LAG",nav_eee:"EEE",
-nav_bw:"Bandwidth",nav_system:"System",nav_fw:"Firmware",nav_lldp:"LLDP",
+nav_bw:"Bandwidth",nav_system:"System",nav_fw:"Firmware",nav_lldp:"LLDP",nav_snmp:"SNMP",
 hdr_dirty:"unsaved changes",hdr_dirty_t:"Running config differs from startup config",
 hdr_save:"Save to flash",hdr_save_t:"Persist running configuration to flash",
 th_auto:"System",th_auto_sel:"System (Selenized)",sy_display:"Display",sy_theme:"Theme",sy_display_note:"Stored in this browser only.",th_light:"Light",th_dark:"Dark",
@@ -41,6 +41,9 @@ stp_en_d:"Ports start blocked and take up to twice the forward delay to reach fo
 stp_dis_q:"Disable spanning tree?",stp_dis_d:"All ports go straight to forwarding; loop protection is lost.",
 stp_cost_err:"Path cost must be 0-200000000",
 lldp_enabled: "LLDP Enabled",lldp_title:"Service Status",lldp_portname:"Name",lldp_enable:"Send Frames",
+snmp_title:"SNMP",snmp_enabled:"Enabled",snmp_community:"Community",snmp_contact:"Contact",snmp_location:"Location",
+snmp_note:"Read-only SNMPv1/v2c agent on UDP port 161 (system and interfaces groups). No SNMPv3, SetRequest, or traps. Settings apply immediately; use Save to flash to keep them across a restart.",
+snmp_field_err:"Must be 1-{n} characters, no spaces",
 st_title:"Port statistics",st_h:"totals since boot",st_txg:"TX good",st_txb:"TX bad",st_rxg:"RX good",
 st_rxb:"RX bad",st_details:"Details",st_counters:"MIB counters",st_nonzero:"non-zero only",
 st_autoref:"auto-refresh",st_counter:"Counter",st_value:"Value",st_fail:"failed to load counters",
@@ -558,6 +561,7 @@ var CONF_CMDS=[
   /^stp\s+(port\s+\d{1,2}|lag\s+[1-4])\s+guard\s+(none|bpdu|root)$/,/^stp\s+(port\s+\d{1,2}|lag\s+[1-4])\s+filter\s+(on|off)$/,
   /^stp\s+(port\s+\d{1,2}|lag\s+[1-4])\s+p2p\s+(auto|on|off)$/,
   /^igmp\s+(on|off)$/,/^mtu\s+\d{1,2}\s+\d+$/,/^lldp\s+(on|off)$/,
+  /^snmp\s+(on|off)$/,/^snmp\s+community\s+\S+$/,/^snmp\s+contact\s+\S+$/,/^snmp\s+location\s+\S+$/,
   /^bw\s+(in|out)\s+\d{1,2}\s+\S+$/,
 ];
 function isConfCmd(line){
@@ -618,6 +622,7 @@ var TABS=[
   {id:"mirror",icon:"M12 3v18M7 8l-4 4 4 4M17 8l4 4-4 4"},
   {id:"lag",   icon:"M7 8a4 4 0 100 8h3M17 8a4 4 0 110 8h-3M9 12h6"},
   {id:"lldp",  icon:"M11 12a1 1 0 002 0 1 1 0 00-2 0M8.5 8.5a5 5 0 000 7M15.5 8.5a5 5 0 010 7M5.6 5.6a9 9 0 000 12.8M18.4 5.6a9 9 0 010 12.8"},
+  {id:"snmp",  icon:"M2 12S5.5 5 12 5s10 7 10 7-3.5 7-10 7-10-7-10-7zM12 15a3 3 0 100-6 3 3 0 000 6z"},
   {id:"eee",   icon:"M13 2L4 14h6l-1 8 9-12h-6z"},
   {id:"bw",    icon:"M4 18a8 8 0 0116 0M12 18l4-6"},
   {id:"system",icon:"M12 8a4 4 0 100 8 4 4 0 000-8zM4 12h2M18 12h2M12 4v2M12 18v2M6 6l1.5 1.5M16.5 16.5L18 18M18 6l-1.5 1.5M7.5 16.5L6 18"},
@@ -1561,6 +1566,43 @@ $("lldp_en").addEventListener("change",function(){
 tabHooks.lldp={enter:needPorts(lldpLoad)};
 
 
+function snmpLoad(){
+  return getJSON("/snmp.json").then(function(s){
+    $("snmp_en").checked=s.on;
+    $("snmp_community").value=s.community||"";
+    $("snmp_contact").value=s.contact||"";
+    $("snmp_location").value=s.location||"";
+  }).catch(function(e){console.log("ERROR!"); console.log(e)});
+}
+
+$("snmp_en").addEventListener("change",function(){
+  var el=this;
+  postCmd("snmp "+(el.checked?"on":"off")).catch(function(){el.checked=!el.checked});
+});
+
+function snmpField(id,max){
+  var v=$(id).value.trim();
+  if(v&&!new RegExp("^\\S{1,"+max+"}$").test(v)){toast(t("snmp_field_err",{n:max}),"err");return undefined;}
+  return v;
+}
+$("snmp_apply").addEventListener("click",function(){
+  var community=snmpField("snmp_community",15);
+  if(community===undefined)return;
+  var contact=snmpField("snmp_contact",31);
+  if(contact===undefined)return;
+  var location=snmpField("snmp_location",31);
+  if(location===undefined)return;
+  var cmds=[];
+  if(community)cmds.push("snmp community "+community);
+  if(contact)cmds.push("snmp contact "+contact);
+  if(location)cmds.push("snmp location "+location);
+  if(!cmds.length)return;
+  postCmds(cmds).then(snmpLoad).catch(function(){});
+});
+
+tabHooks.snmp={enter:snmpLoad};
+
+
 function eeeFlags(bits){
   var b=parseInt(bits,2);
   return["100M","1G","2.5G"].map(function(s,i){
@@ -1781,8 +1823,9 @@ var CONF_OVERWRITE=[
   /^stp\s+(prio|hello|maxage|fwd|txhold|version)\b/,
   /^stp\s+(port\s+\d{1,2}|lag\s+[1-4])\s+(edge|cost|prio|guard|filter|p2p)\b/,
   /^igmp\b/,/^mtu\s+\d{1,2}\b/,
+  /^snmp\s+community\b/,/^snmp\s+contact\b/,/^snmp\s+location\b/,
 ];
-var CONF_TOGGLE=[/^(syslog)\s+(on|off)$/,/^(stp)\s+(on|off)$/,/^(stp\s+(port\s+\d{1,2}|lag\s+[1-4]))\s+(on|off)$/];
+var CONF_TOGGLE=[/^(syslog)\s+(on|off)$/,/^(stp)\s+(on|off)$/,/^(stp\s+(port\s+\d{1,2}|lag\s+[1-4]))\s+(on|off)$/,/^(snmp)\s+(on|off)$/];
 function mergeConf(base,texts){
   var conf=base.slice();
   function drop(rx){conf=conf.filter(function(c){return!rx.test(c)})}

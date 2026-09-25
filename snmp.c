@@ -103,6 +103,10 @@ __xdata uint16_t snmp_sender_port;
  */
 #define KIND_SCALAR	0
 #define KIND_TABLE	1
+/* Like KIND_TABLE but the instance walks the uIP ARP cache (1..
+ * UIP_ARPTAB_SIZE) instead of ifIndex, and rows with an empty ARP
+ * slot are skipped during lookup/GET-NEXT. */
+#define KIND_ARPTABLE	2
 
 /* Handler ids double as symbolic names for the switch in
  * snmp_encode_value(). */
@@ -114,6 +118,7 @@ enum {
 	H_IFPHYS, H_IFADMIN, H_IFOPER,
 	H_IFINOCTETS, H_IFINUCAST, H_IFINERR,
 	H_IFOUTOCTETS, H_IFOUTUCAST, H_IFOUTERR,
+	H_ARPIFINDEX, H_ARPPHYSADDR, H_ARPNETADDR, H_ARPTYPE,
 };
 
 struct mib_node {
@@ -147,6 +152,15 @@ static __code const struct mib_node mib_table[] = {
 	{ 4, { 2, 2, 1, 16 }, KIND_TABLE, H_IFOUTOCTETS },
 	{ 4, { 2, 2, 1, 17 }, KIND_TABLE, H_IFOUTUCAST },
 	{ 4, { 2, 2, 1, 20 }, KIND_TABLE, H_IFOUTERR },
+	/* ipNetToMediaTable (.1.3.6.1.2.1.4.22.1): the ARP cache. Real
+	 * INDEX is { ifIndex, ipNetToMediaNetAddress }; we index by ARP
+	 * slot number instead (see KIND_ARPTABLE) and report a constant
+	 * ifIndex, since entries here are not tied to a physical port -
+	 * see doc/snmp.md. */
+	{ 4, { 4, 22, 1, 1 }, KIND_ARPTABLE, H_ARPIFINDEX },
+	{ 4, { 4, 22, 1, 2 }, KIND_ARPTABLE, H_ARPPHYSADDR },
+	{ 4, { 4, 22, 1, 3 }, KIND_ARPTABLE, H_ARPNETADDR },
+	{ 4, { 4, 22, 1, 4 }, KIND_ARPTABLE, H_ARPTYPE },
 };
 #define MIB_TABLE_LEN (sizeof(mib_table) / sizeof(mib_table[0]))
 
@@ -185,6 +199,14 @@ static uint8_t ifindex_phys(uint8_t idx)
 static uint8_t ifindex_log(uint8_t idx)
 {
 	return machine.min_port + idx - 1;
+}
+
+/* Is ARP cache slot `row` (1-based) occupied? */
+static uint8_t arp_row_used(uint8_t row)
+{
+	if (row < 1 || row > UIP_ARPTAB_SIZE)
+		return 0;
+	return arp_table[row - 1].ipaddr[0] != 0 || arp_table[row - 1].ipaddr[1] != 0;
 }
 
 /*
@@ -263,8 +285,6 @@ static uint8_t ber_read_oid(__xdata uint8_t *buf, __xdata uint16_t *pos,
 	/* First byte encodes two subids: 40*a + b (a in 0..2, b < 40 when
 	 * a < 2, otherwise unbounded). We only expect 0x2b (1.3) here. */
 	uint8_t first = buf[(*pos)++];
-	if (n + 2 > SNMP_OID_MAX)
-		return 0;
 	snmp_oid[n++] = first / 40;
 	snmp_oid[n++] = first % 40;
 	while (*pos < stop) {
@@ -332,7 +352,10 @@ static uint8_t mib_lookup(__xdata uint8_t *inst)
 			}
 			continue;
 		}
-		/* Table column: iterate ifIndex 1..np. */
+		/* Table column: iterate the row instance 1..np (ifIndex, or
+		 * ARP slot number for KIND_ARPTABLE). */
+		lk_np = (mib_table[lk_i].kind == KIND_ARPTABLE) ?
+			UIP_ARPTAB_SIZE : n_ports();
 		lk_k = MIB_PREFIX_LEN + mib_table[lk_i].suffix_len;
 		if (snmp_oid_len != lk_k + 1)
 			continue;
@@ -340,6 +363,9 @@ static uint8_t mib_lookup(__xdata uint8_t *inst)
 		if (oid_cmp_candidate(&mib_table[lk_i], 1) > 0)
 			continue;
 		for (lk_p = 1; lk_p <= lk_np; lk_p++) {
+			if (mib_table[lk_i].kind == KIND_ARPTABLE &&
+			    !arp_row_used(lk_p))
+				continue;
 			if (oid_cmp_candidate(&mib_table[lk_i], lk_p) == 0) {
 				*inst = lk_p;
 				return mib_table[lk_i].handler;
@@ -375,9 +401,14 @@ static uint8_t mib_get_next(__xdata uint8_t *inst)
 			}
 			continue;
 		}
-		/* Table column: find first ifIndex whose OID is strictly
+		/* Table column: find first instance whose OID is strictly
 		 * greater than the target. */
+		lk_np = (mib_table[lk_i].kind == KIND_ARPTABLE) ?
+			UIP_ARPTAB_SIZE : n_ports();
 		for (lk_p = 1; lk_p <= lk_np; lk_p++) {
+			if (mib_table[lk_i].kind == KIND_ARPTABLE &&
+			    !arp_row_used(lk_p))
+				continue;
 			lk_c = oid_cmp_candidate(&mib_table[lk_i], lk_p);
 			if (lk_c < 0) {
 				for (lk_k = 0; lk_k < MIB_PREFIX_LEN; lk_k++)
@@ -649,6 +680,32 @@ static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint8_t inst)
 		ev_log = ifindex_log(inst);
 		ev_vlen = put_uint(ev_v,
 				   port_counter(ev_log, STAT_COUNTER_ERR_PKTS));
+		break;
+	case H_ARPIFINDEX:
+		ev_tag = BER_INTEGER;
+		/* ARP entries belong to the switch's single management IP
+		 * stack, not to a physical port; report a fixed ifIndex. */
+		ev_vlen = put_uint(ev_v, 1);
+		break;
+	case H_ARPPHYSADDR:
+		for (ev_i = 0; ev_i < 6; ev_i++)
+			ev_v[ev_i] = arp_table[inst - 1].ethaddr.addr[ev_i];
+		ev_vlen = 6;
+		break;
+	case H_ARPNETADDR:
+		ev_tag = BER_IPADDR;
+		/* Byte order matches how send_basic_info() unpacks a uIP
+		 * u16_t[2] address elsewhere (low byte of word0, high byte
+		 * of word0, low byte of word1, high byte of word1). */
+		ev_v[0] = (uint8_t)arp_table[inst - 1].ipaddr[0];
+		ev_v[1] = arp_table[inst - 1].ipaddr[0] >> 8;
+		ev_v[2] = (uint8_t)arp_table[inst - 1].ipaddr[1];
+		ev_v[3] = arp_table[inst - 1].ipaddr[1] >> 8;
+		ev_vlen = 4;
+		break;
+	case H_ARPTYPE:
+		ev_tag = BER_INTEGER;
+		ev_vlen = put_uint(ev_v, 3);	/* dynamic */
 		break;
 	default:
 		/* Should never happen; encode an empty octet string. */

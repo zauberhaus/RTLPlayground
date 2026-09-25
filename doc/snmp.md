@@ -87,6 +87,26 @@ Served ifTable columns:
 | `ifOutUcastPkts` | `.1.17.<n>` | Counter32 | TX packet count |
 | `ifOutErrors` | `.1.20.<n>` | Counter32 | error packet count |
 
+### `ipNetToMediaTable` (`.1.3.6.1.2.1.4.22`) - the ARP cache
+
+The switch's own ARP cache (up to 8 entries, uIP's `UIP_ARPTAB_SIZE`),
+i.e. the IP-to-MAC mappings the switch itself has learned for its
+management IP stack. This is not per-port data - it has nothing to do
+with the L2 MAC address table (`/l2.json` / the CLI's L2 table), which
+tracks what the switch has learned on the wire.
+
+Served ipNetToMediaTable columns:
+
+| column | OID suffix | type | value |
+|--------|------------|------|-------|
+| `ipNetToMediaIfIndex` | `.1.1.<n>` | INTEGER | always `1` (see limitation below) |
+| `ipNetToMediaPhysAddress` | `.1.2.<n>` | OCTET STRING | MAC address |
+| `ipNetToMediaNetAddress` | `.1.3.<n>` | IpAddress | IP address |
+| `ipNetToMediaType` | `.1.4.<n>` | INTEGER | always `3` (dynamic) |
+
+`<n>` is the 1-based ARP cache slot number (1-8), not a real index
+value - see the next section.
+
 ### Limitations
 
 * Only `GetRequest`, `GetNextRequest` and `GetBulkRequest` are
@@ -102,3 +122,10 @@ Served ifTable columns:
 * Byte counters are not exposed by the ASIC to the CPU port
   directly; `ifInOctets` / `ifOutOctets` report the RX / TX packet
   count so that graphs still show growth over time.
+* `ipNetToMediaTable`'s real INDEX is `{ ifIndex, ipNetToMediaNetAddress }`
+  (RFC 1213); this agent indexes by ARP slot number instead, and
+  `ipNetToMediaIfIndex` is a fixed `1` rather than the interface the
+  entry was actually learned on (which uIP's ARP cache does not
+  record). `snmpwalk`/`snmpget` still return correct IP/MAC values -
+  only tooling that parses the index itself to recover the IP address,
+  instead of reading `ipNetToMediaNetAddress`, is affected.

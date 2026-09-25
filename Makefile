@@ -83,7 +83,8 @@ SRCS += \
 	rtl837x_lldp.c
 SRCS += \
 	httpd/httpd.c \
-	httpd/page_impl.c
+	httpd/page_impl.c \
+	httpd/page_impl_snmp.c
 SRCS += \
 	uip/timer.c \
 	uip/uip.c \

@@ -342,6 +342,21 @@ button.danger{background:var(--bad);color:#fff;border-color:transparent}
       </div>
     </section>
 
+    <section class="tab" id="tab-snmp">
+      <div class="card"><h2 data-i18n="snmp_title">SNMP</h2>
+        <label class="row"><span class="lb" data-i18n="snmp_enabled">Enabled</span>
+          <span class="switch"><input type="checkbox" id="snmp_en"><i></i></span>
+        </label>
+        <label class="row"><span class="lb" data-i18n="snmp_community">Community</span><input class="in" id="snmp_community" maxlength="15"></label>
+        <label class="row"><span class="lb" data-i18n="snmp_contact">Contact</span><input class="in" id="snmp_contact" maxlength="31"></label>
+        <label class="row"><span class="lb" data-i18n="snmp_location">Location</span><input class="in" id="snmp_location" maxlength="31"></label>
+        <div style="display:flex;gap:10px;margin-top:12px">
+          <button class="ctl pri" id="snmp_apply" data-i18n="c_apply">Apply</button>
+        </div>
+        <p class="small mut" style="margin-top:8px" data-i18n="snmp_note">Read-only SNMPv1/v2c agent on UDP port 161 (system and interfaces groups). No SNMPv3, SetRequest, or traps. Settings apply immediately; use Save to flash to keep them across a restart.</p>
+      </div>
+    </section>
+
     <section class="tab" id="tab-lag">
       <div id="lagwrap" class="grid2"></div>
       <p class="small mut" style="margin-top:10px" data-i18n="lag_note">A LAG needs at least one member to be saved in the startup config; applying an empty group clears it.</p>
