@@ -908,7 +908,11 @@ void parse_port(void)
 		print_string("\nName set to: \"");
 		print_string_x(port_names[phy_settings.port]);
 		print_string("\"\n");
-	} else if (machine.is_sfp[phy_settings.port]) {
+	} else if (machine.is_sfp[phy_settings.port] && !cmd_compare(2, "lldp")) {
+		/* lldp doesn't need PHY info (it's an LLDP TX enable/disable
+		 * bit, not a speed setting), so this SFP catch-all must not
+		 * intercept it before it reaches the "lldp" branch below -
+		 * SFP ports need to be able to toggle LLDP too. */
 		print_string(" is SFP no PHY information available.\n");
 	} else if (cmd_compare(2, "10m")) {
 		print_string(" 10M\n");
@@ -966,9 +970,9 @@ void parse_port(void)
 		 * (see send_lldp()); phy_settings.port is logical - convert,
 		 * or this sets the wrong port's bit. */
 		if (cmd_compare(3, "block")){
-			lldp_physical_port_status &= ~(1 << machine.log_to_phys_port[phy_settings.port]);
+			lldp_physical_port_status &= ~((uint16_t)1 << machine.log_to_phys_port[phy_settings.port]);
 		} else if (cmd_compare(3, "permit")) {
-			lldp_physical_port_status |= 1 << machine.log_to_phys_port[phy_settings.port];
+			lldp_physical_port_status |= (uint16_t)1 << machine.log_to_phys_port[phy_settings.port];
 		} else {
 			print_string ("Unknown port <port> lldp [block|permit] command\n");
 		}

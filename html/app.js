@@ -1848,7 +1848,7 @@ var CONF_OVERWRITE=[
   /^igmp\b/,/^mtu\s+\d{1,2}\b/,
   /^snmp\s+community\b/,/^snmp\s+contact\b/,/^snmp\s+location\b/,
 ];
-var CONF_TOGGLE=[/^(syslog)\s+(on|off)$/,/^(stp)\s+(on|off)$/,/^(stp\s+(port\s+\d{1,2}|lag\s+[1-4]))\s+(on|off)$/,/^(snmp)\s+(on|off)$/];
+var CONF_TOGGLE=[/^(syslog)\s+(on|off)$/,/^(stp)\s+(on|off)$/,/^(stp\s+(port\s+\d{1,2}|lag\s+[1-4]))\s+(on|off)$/,/^(snmp)\s+(on|off)$/,/^(lldp)\s+(on|off)$/];
 function mergeConf(base,texts){
   var conf=base.slice();
   function drop(rx){conf=conf.filter(function(c){return!rx.test(c)})}

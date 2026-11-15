@@ -54,7 +54,14 @@ void send_lldp(void) __banked
 		slen += strtox(outbuf + slen, "{\"portNum\":");
 		itoa_char(machine.log_to_phys_port[port]);
 		slen += strtox(outbuf + slen, ",\"on\":");
-		bool_char((1 << machine.log_to_phys_port[port]) & lldp_physical_port_status);
+		/* bool_char() takes a single-byte char: computing the shift+AND
+		 * directly as its argument lets SDCC narrow the whole
+		 * expression to 8 bits (since that is all the destination
+		 * needs), silently losing ports >= 8 whose bit lives in the
+		 * high byte. Reducing to a proper 0/1 first (?: has no
+		 * narrower destination to optimize into, unlike a bare
+		 * function argument) avoids that. */
+		bool_char((((uint16_t)1 << machine.log_to_phys_port[port]) & lldp_physical_port_status) ? 1 : 0);
 		slen += strtox(outbuf + slen, "},");
 	}
 	slen -= 1; // remove comma
