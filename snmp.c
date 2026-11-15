@@ -51,6 +51,7 @@ extern __xdata struct uip_eth_addr uip_ethaddr;
 extern __xdata uint8_t sfr_data[4];
 extern __xdata uint16_t lldp_physical_port_status;
 extern __xdata bool lldp_enabled;
+extern __xdata uint8_t vlan_names[VLAN_NAMES_SIZE];
 
 /*
  * Globals for the module. Kept in xdata; the CPU has no cycles to
@@ -124,6 +125,14 @@ __xdata uint16_t snmp_sender_port;
  * loop, which would be far too slow over a 4096-slot table. See
  * fdb_read_at_or_after(). */
 #define KIND_FDBTABLE	3
+/* Like KIND_TABLE but the instance is a VLAN ID (1..VLAN_ID_MAX) rather
+ * than ifIndex, walked with a plain increasing scan (there is no
+ * hardware "next configured VLAN" primitive - unlike KIND_FDBTABLE -
+ * but VLAN IDs are few and low-numbered in practice, and send_vlanlist()
+ * in httpd/page_impl.c already does the same full 1..4094 scan for the
+ * web UI's VLAN list). Rows with no configured VLAN at that ID are
+ * skipped during lookup/GET-NEXT - see vlan_row_used(). */
+#define KIND_VLANTABLE	4
 
 /* Handler ids double as symbolic names for the switch in
  * snmp_encode_value(). */
@@ -140,11 +149,12 @@ enum {
 	H_FDBADDR, H_FDBPORT, H_FDBSTATUS,
 	H_LLDPPORTADMIN, H_LLDPCHASSISSUBTYPE, H_LLDPCHASSISID,
 	H_LLDPSYSNAME, H_LLDPSYSDESC,
+	H_VLANNAME, H_VLANEGRESS, H_VLANUNTAGGED, H_VLANROWSTATUS,
 };
 
 struct mib_node {
 	uint8_t suffix_len;
-	uint8_t suffix[6];
+	uint8_t suffix[7];	/* dot1qVlanStaticTable's suffix needs 7 */
 	uint8_t prefix_id;	/* 0 = mib_prefix (mib-2), 1 = lldp_prefix */
 	uint8_t kind;
 	uint8_t handler;
@@ -203,6 +213,14 @@ static __code const struct mib_node mib_table[] = {
 	{ 5, { 17, 4, 3, 1, 1 }, 0, KIND_FDBTABLE, H_FDBADDR },
 	{ 5, { 17, 4, 3, 1, 2 }, 0, KIND_FDBTABLE, H_FDBPORT },
 	{ 5, { 17, 4, 3, 1, 3 }, 0, KIND_FDBTABLE, H_FDBSTATUS },
+	/* dot1qVlanStaticTable (Q-BRIDGE-MIB, .17.7.1.4.3.1): the
+	 * configured VLANs. Unlike dot1dTpFdbTable/ipNetToMediaTable
+	 * above, the INDEX here (the VLAN ID) is exactly what RFC 2674
+	 * specifies - no fake-index caveat needed, see doc/snmp.md. */
+	{ 7, { 17, 7, 1, 4, 3, 1, 1 }, 0, KIND_VLANTABLE, H_VLANNAME },
+	{ 7, { 17, 7, 1, 4, 3, 1, 2 }, 0, KIND_VLANTABLE, H_VLANEGRESS },
+	{ 7, { 17, 7, 1, 4, 3, 1, 4 }, 0, KIND_VLANTABLE, H_VLANUNTAGGED },
+	{ 7, { 17, 7, 1, 4, 3, 1, 5 }, 0, KIND_VLANTABLE, H_VLANROWSTATUS },
 	/* ifXTable (.31.1.1.1): just the two columns worth the extra
 	 * code size - ifName and ifHighSpeed. No 64-bit HC counters:
 	 * there is no real 64-bit source data behind them, same as
@@ -274,6 +292,34 @@ static uint8_t arp_row_used(uint8_t row)
 }
 
 /*
+ * ---- VLAN table (Q-BRIDGE-MIB dot1qVlanStaticTable) --------------------
+ */
+
+#define VLAN_ID_MAX 4094
+
+static __xdata uint16_t vl_members, vl_untagged;
+
+/* Is VLAN `vlan` configured? On success fills vl_members/vl_untagged
+ * and returns 1. Bit layout of the raw ASIC word (see vlan_create()
+ * and test/test_port_tables.c's vlan_word()): bits 0-9 members, bits
+ * 10-19 the untagged set (every non-tagged port INCLUDING non-members,
+ * whose bit is meaningless - masked against members below to get the
+ * true untagged-member set), bit 25 the valid flag. Same existence
+ * check as send_vlanlist() in httpd/page_impl.c. */
+static uint8_t vlan_row_used(uint16_t vlan)
+{
+	if (vlan < 1 || vlan > VLAN_ID_MAX)
+		return 0;
+	if (vlan_get(vlan) < 0)
+		return 0;
+	if (!(sfr_data[0] & 0x02))
+		return 0;
+	vl_members = ((uint16_t)(sfr_data[2] & 0x03) << 8) | sfr_data[3];
+	vl_untagged = (((uint16_t)(sfr_data[1] & 0x0f) << 6) | (sfr_data[2] >> 2)) & vl_members;
+	return 1;
+}
+
+/*
  * ---- L2/FDB table (BRIDGE-MIB dot1dTpFdbTable) -------------------------
  */
 
@@ -288,9 +334,14 @@ static __xdata uint8_t fd_static;
 /* Read the first valid L2 entry at or after raw hw index `from`, using
  * the same ASIC "read next" primitive as send_l2()/l2_delete() in
  * httpd/page_impl.c (TBL_LUTREAD_NEXT_L2UC: returns the closest valid
- * entry >= the given index, not necessarily AT it). On success fills
- * fd_found/fd_mac/fd_port/fd_static and returns 1; returns 0 if no
- * valid entry exists at or after `from`. */
+ * entry >= the given index - but wraps around to the table's first
+ * entry, rather than signalling "none", once nothing at or after
+ * `from` remains; see send_l2()'s own first_entry/wraparound comment).
+ * On success fills fd_found/fd_mac/fd_port/fd_static and returns 1;
+ * returns 0 if no valid entry exists at or after `from` (including
+ * when the hardware wrapped around, which we detect and reject here -
+ * unlike send_l2(), a single call has no "first entry seen so far" to
+ * compare against, so the check is simply fd_found < from). */
 static uint8_t fdb_read_at_or_after(uint16_t from)
 {
 	do {
@@ -325,6 +376,8 @@ static uint8_t fdb_read_at_or_after(uint16_t from)
 
 	reg_read_m(RTL837x_TBL_DATA_0);
 	fd_found = (((uint16_t)sfr_data[2] & 0x0f) << 8) | sfr_data[3];
+	if (fd_found < from)
+		return 0;	/* wrapped around: nothing at or after `from` */
 	return 1;
 }
 
@@ -445,7 +498,11 @@ static uint8_t ber_read_oid(__xdata uint8_t *buf, __xdata uint16_t *pos,
 
 /* Shared scratch for the walk/compare helpers - see snmp_process for
  * why these are module-scope in __xdata. */
-static __xdata uint8_t lk_i, lk_k, lk_p, lk_np;
+static __xdata uint8_t lk_i, lk_k;
+/* uint16_t, not uint8_t: KIND_VLANTABLE's instance range goes up to
+ * VLAN_ID_MAX (4094), unlike ifIndex/ARP-slot rows which fit in a
+ * byte. */
+static __xdata uint16_t lk_p, lk_np;
 static __xdata uint16_t lk_plen, lk_base, lk_target, lk_start;
 static __xdata int8_t lk_c;
 static __xdata uint16_t oc_a_len, oc_i, oc_cand, oc_plen;
@@ -529,6 +586,23 @@ static uint8_t mib_lookup(__xdata uint16_t *inst)
 			}
 			continue;
 		}
+		if (mib_table[lk_i].kind == KIND_VLANTABLE) {
+			/* Unlike the generic table-column loop below, extract
+			 * the target VLAN ID directly instead of looping up to
+			 * VLAN_ID_MAX times per exact GET - the instance is
+			 * already the real INDEX, no slot-vs-instance mapping
+			 * needed (see the mib_table comment above). */
+			lk_base = prefix_len(&mib_table[lk_i]) + mib_table[lk_i].suffix_len;
+			if (snmp_oid_len != lk_base + 1 ||
+			    oid_cmp_column(&mib_table[lk_i]) != 0)
+				continue;
+			lk_target = snmp_oid[lk_base];
+			if (vlan_row_used(lk_target)) {
+				*inst = lk_target;
+				return mib_table[lk_i].handler;
+			}
+			continue;
+		}
 		/* Table column: iterate the row instance 1..np (ifIndex, or
 		 * ARP slot number for KIND_ARPTABLE). */
 		lk_np = (mib_table[lk_i].kind == KIND_ARPTABLE) ?
@@ -603,6 +677,37 @@ static uint8_t mib_get_next(__xdata uint16_t *inst)
 			snmp_oid[lk_base] = fd_found + 1;
 			snmp_oid_len = lk_base + 1;
 			*inst = fd_found + 1;
+			return mib_table[lk_i].handler;
+		}
+		if (mib_table[lk_i].kind == KIND_VLANTABLE) {
+			lk_plen = prefix_len(&mib_table[lk_i]);
+			lk_base = lk_plen + mib_table[lk_i].suffix_len;
+			lk_c = oid_cmp_column(&mib_table[lk_i]);
+			if (lk_c > 0)
+				continue;	/* target sorts after this column */
+			if (lk_c < 0 || snmp_oid_len <= lk_base) {
+				lk_start = 1;	/* fresh walk into this column */
+			} else if (snmp_oid_len == lk_base + 1) {
+				lk_start = snmp_oid[lk_base] + 1;
+			} else {
+				continue;	/* OID too deep for a single instance */
+			}
+			/* No hardware "next configured VLAN" primitive (see the
+			 * KIND_VLANTABLE comment above) - scan forward until one
+			 * is found or the ID space is exhausted. */
+			for (; lk_start <= VLAN_ID_MAX; lk_start++) {
+				if (vlan_row_used(lk_start))
+					break;
+			}
+			if (lk_start > VLAN_ID_MAX)
+				continue;
+			for (lk_k = 0; lk_k < lk_plen; lk_k++)
+				snmp_oid[lk_k] = prefix_at(&mib_table[lk_i], lk_k);
+			for (lk_k = 0; lk_k < mib_table[lk_i].suffix_len; lk_k++)
+				snmp_oid[lk_plen + lk_k] = mib_table[lk_i].suffix[lk_k];
+			snmp_oid[lk_base] = lk_start;
+			snmp_oid_len = lk_base + 1;
+			*inst = lk_start;
 			return mib_table[lk_i].handler;
 		}
 		/* Table column: find first instance whose OID is strictly
@@ -818,6 +923,7 @@ static __xdata uint8_t ev_tag;
 static __xdata uint8_t * __xdata ev_v;
 static __xdata uint32_t ev_u32;
 static __xdata uint8_t ev_log, ev_phys, ev_i;
+static __xdata uint16_t ev_pos;	/* vlan_names[] index for H_VLANNAME */
 
 static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint16_t inst)
 {
@@ -986,7 +1092,7 @@ static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint16_t inst)
 		/* txOnly(3)/disabled(4): this agent never processes
 		 * received LLDP frames, so rxOnly/txAndRx never apply. */
 		ev_vlen = put_uint(ev_v,
-			(lldp_enabled && ((1 << machine.log_to_phys_port[ev_log]) &
+			(lldp_enabled && (((uint16_t)1 << machine.log_to_phys_port[ev_log]) &
 					  lldp_physical_port_status)) ? 3 : 4);
 		break;
 	case H_LLDPCHASSISSUBTYPE:
@@ -1003,6 +1109,35 @@ static uint16_t encode_value(__xdata uint8_t *p, uint8_t handler, uint16_t inst)
 		break;
 	case H_LLDPSYSDESC:
 		ev_vlen = put_cstr(ev_v, machine.machine_name);
+		break;
+	case H_VLANNAME:
+		ev_pos = vlan_name(inst);
+		ev_vlen = 0;
+		if (ev_pos != 0xffff) {
+			while (vlan_names[ev_pos] && vlan_names[ev_pos] != ' ')
+				ev_v[ev_vlen++] = vlan_names[ev_pos++];
+		}
+		break;
+	case H_VLANEGRESS:
+		/* Not a standard PortList (bit-per-port, MSB = port 1): a
+		 * plain 16-bit bitmask, high byte first, bit N = physical
+		 * port N - same numbering as vlan_settings.members/the
+		 * `vlan <id> <port>...` CLI command, not ifIndex. See
+		 * doc/snmp.md. */
+		vlan_row_used(inst);
+		ev_v[0] = vl_members >> 8;
+		ev_v[1] = (uint8_t)vl_members;
+		ev_vlen = 2;
+		break;
+	case H_VLANUNTAGGED:
+		vlan_row_used(inst);
+		ev_v[0] = vl_untagged >> 8;
+		ev_v[1] = (uint8_t)vl_untagged;
+		ev_vlen = 2;
+		break;
+	case H_VLANROWSTATUS:
+		ev_tag = BER_INTEGER;
+		ev_vlen = put_uint(ev_v, 1);	/* active(1): the row exists */
 		break;
 	default:
 		/* Should never happen; encode an empty octet string. */
@@ -1330,7 +1465,7 @@ void snmp_start(void) __banked __reentrant
 	}
 	uip_udp_bind(snmp_state.conn, HTONS(SNMP_PORT));
 	snmp_state.enabled = 1;
-	print_string("SNMP agent started on port 161\n");
+	print_string("SNMP: Agent started on port 161\n");
 }
 
 void snmp_stop(void) __banked __reentrant
@@ -1339,7 +1474,7 @@ void snmp_stop(void) __banked __reentrant
 	if (snmp_state.conn != 0) {
 		uip_udp_remove(snmp_state.conn);
 		snmp_state.conn = 0;
-		print_string("SNMP agent stopped\n");
+		print_string("SNMP: Agent stopped\n");
 	}
 }
 

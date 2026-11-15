@@ -3,7 +3,8 @@
 This firmware ships a small read-only SNMPv1 / SNMPv2c agent on
 UDP port 161. Its purpose is to expose the state that already lives
 on the switch (system identity, uptime, per-port link state, per-port
-counters, the L2/MAC address table, LLDP TX status) to any off-the-shelf
+counters, the L2/MAC address table, configured VLANs, LLDP TX status)
+to any off-the-shelf
 monitoring tool - Grafana with `snmp_exporter`, LibreNMS, Zabbix, PRTG,
 `net-snmp` from the shell, etc. There is no support for SNMPv3, no
 support for `SetRequest`, and no traps.
@@ -41,6 +42,7 @@ therefore follows the `hostname` command.
 snmpwalk -v2c -c public 192.168.10.247 system
 snmpwalk -v2c -c public 192.168.10.247 ifTable
 snmpwalk -v2c -c public 192.168.10.247 dot1dTpFdbTable
+snmpwalk -v2c -c public 192.168.10.247 dot1qVlanStaticTable
 ```
 
 Or, to browse everything the agent serves under mib-2:
@@ -147,6 +149,37 @@ MAC address - see Limitations below. `GetNext` walks the table using
 the ASIC's own "next occupied slot" hardware primitive rather than
 probing all 4096 slots per step, so a full `snmpwalk` stays fast even
 though the index space is large and sparse.
+
+### `dot1qVlanStaticTable` (`.1.3.6.1.2.1.17.7.1.4.3.1`, Q-BRIDGE-MIB) - configured VLANs
+
+The switch's configured VLANs, the same data as the web UI's VLAN page
+/ the CLI's `vlan show`. Unlike `dot1dTpFdbTable` and
+`ipNetToMediaTable` above, the index here is exactly what RFC 2674
+specifies - `dot1qVlanIndex` is the VLAN ID itself (1-4094), no
+fake-index caveat needed.
+
+| column | OID suffix | type | value |
+|--------|------------|------|-------|
+| `dot1qVlanStaticName` | `.1.<vlan>` | OCTET STRING | the name set via `vlan <id> <name> ...`, empty if unnamed |
+| `dot1qVlanStaticEgressPorts` | `.2.<vlan>` | OCTET STRING | member ports (see below) |
+| `dot1qVlanStaticUntaggedPorts` | `.4.<vlan>` | OCTET STRING | untagged member ports (see below) |
+| `dot1qVlanStaticRowStatus` | `.5.<vlan>` | INTEGER | always `active(1)` - only existing VLANs are served |
+
+**Not a standard `PortList`**: RFC 2674 specifies a bit-per-port
+octet string with the MSB of the first octet as port 1. This agent
+instead reports a plain 16-bit bitmask, high byte first, with bit *N*
+set for physical port *N* - the same numbering `vlan_settings.members`
+and the `vlan <id> <port>...` CLI command use, not `ifIndex`. Tools
+that decode `PortList` per the RFC will show the wrong ports; reading
+the two octets as a raw bitmask gives the right membership.
+
+There is no ASIC "next configured VLAN" primitive (unlike
+`dot1dTpFdbTable`'s hash table), so `GetNext` scans forward one VLAN
+ID at a time until it finds one that exists - the same approach the
+web UI's VLAN list already uses (`send_vlanlist()` in
+`httpd/page_impl.c`). This is fine in practice (VLANs are normally few
+and low-numbered) but a walk could be slow if very high VLAN IDs are
+used with large gaps between them.
 
 ### LLDP-MIB (`.1.0.8802.1.1.2.1`, IEEE 802.1AB)
 
