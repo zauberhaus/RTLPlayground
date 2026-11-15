@@ -30,6 +30,7 @@
 #include "httpd/page_impl.h"
 #include "boot.h"
 #include "sfp.h"
+#include "version.h"
 
 extern __code const struct machine machine;
 extern __xdata uint32_t flash_size;
@@ -92,6 +93,17 @@ volatile __xdata uint8_t sec_counter;
 volatile __xdata uint16_t sleep_ticks;
 __xdata uint8_t stp_clock;
 __xdata uint8_t arp_age_secs;
+/* Counts down main-loop passes once pending_reboot_reason is set
+ * before actually resetting - see idle()'s use of it and the comment
+ * on pending_reboot_reason in rtl837x_common.h. */
+__xdata uint8_t reboot_countdown;
+/* "System booted" is logged a few seconds into the main loop instead
+ * of right after execute_config(), in case the config starts DHCP:
+ * sent any earlier, the message would go out (if at all) from
+ * 0.0.0.0, before a lease has had a chance to arrive - see idle()'s
+ * use of these. */
+__xdata uint8_t boot_log_pending;
+__xdata uint32_t boot_log_deadline;
 extern __xdata struct dhcp_state dhcp_state;
 
 #define STP_TICK_DIVIDER 3
@@ -137,6 +149,16 @@ __code const uint16_t bit_mask[16] = {
 
 __xdata uint8_t linkbits_last[4];
 __xdata uint8_t linkbits_last_p89;
+/* Separate from linkbits_last[]/linkbits_last_p89 above: those come
+ * from RTL837X_REG_LINKS/_89, which hold each port's last-negotiated
+ * SPEED, not a clean up/down flag - the nibble does not reliably reset
+ * when a port goes down (see port_link_speed() in snmp.c, which checks
+ * RTL837X_REG_LINKS_STS for this exact reason before trusting the
+ * speed nibble at all). Tracked as a flat per-port bitmask (bit N =
+ * port N up), matching RTL837X_REG_LINKS_STS's own layout, so idle()'s
+ * link-change log reliably reports a port going down - see its use
+ * below. */
+__xdata uint16_t linkup_last_bits;
 // Last known state of the SFP detection/Loss of Signal pins
 __xdata bool button_last;
 __xdata uint8_t button_sec_counter_last;
@@ -1129,7 +1151,7 @@ void flash_default_config(void)
 		source += FLASH_BUF_SIZE;
 	}
 
-	print_string("Written default config to flash\n");
+	print_string("Config: Written default config to flash\n");
 }
 
 void handle_button(void)
@@ -1151,19 +1173,21 @@ void handle_button(void)
 		{
 			if (diff_sec_counter > 10)
 			{
-				print_string(">10s button detected; reverting to default settings:\n");
+				print_string("Button: >10s press detected; reverting to default settings:\n");
 				flash_default_config();
-				print_string("Now resetting...\n");
+				print_string("Button: Now resetting...\n");
+				syslog_flush();	/* reset_chip() never returns - flush first */
 				reset_chip();
 			}
 			else if (diff_sec_counter > 3)
 			{
-				print_string(">3s button detected; resetting chip...\n");
+				print_string("Button: >3s press detected; resetting chip...\n");
+				syslog_flush();	/* reset_chip() never returns - flush first */
 				reset_chip();
 			}
 			else
 			{
-				print_string("Short button press detected; no action.\n");
+				print_string("Button: Short press detected; no action.\n");
 				set_sys_led_state(SYS_LED_ON);
 			}
 		}
@@ -1172,6 +1196,29 @@ void handle_button(void)
 			// Give the user feedback for button press
 			set_sys_led_state(SYS_LED_SLOW);
 		}
+	}
+}
+
+/* Per-port speed nibble, same indexing port_link_speed() in snmp.c
+ * uses: ports 0-7 come from RTL837X_REG_LINKS's 4 bytes (2 ports per
+ * byte), ports 8-9 from RTL837X_REG_LINKS_89's byte 3 the same way -
+ * bytes4/byte89 are a snapshot of those, as read by idle() below. */
+static uint8_t port_speed_nibble(uint8_t port, __xdata uint8_t *bytes4, uint8_t byte89)
+{
+	uint8_t b = (port < 8) ? bytes4[3 - (port >> 1)] : byte89;
+	return (port & 1) ? (b >> 4) : (b & 0xf);
+}
+
+static __code const char *port_speed_name(uint8_t nibble)
+{
+	switch (nibble) {
+	case 0: return "10M";
+	case 1: return "100M";
+	case 2: return "1G";
+	case 4: return "10G";
+	case 5: return "2.5G";
+	case 6: return "5G";
+	default: return "down";
 	}
 }
 
@@ -1226,18 +1273,38 @@ void idle(void)
 	}
 
 	// Check for Link changes
+	/* Read first, before anything else below overwrites sfr_data: the
+	 * authoritative per-port up/down bitmask (see linkup_last_bits'
+	 * comment above) - compared and logged further down, once the
+	 * speed registers are also in hand for the "up" case's speed
+	 * label. */
+	reg_read_m(RTL837X_REG_LINKS_STS);
+	__xdata uint16_t up_bits = ((uint16_t)sfr_data[2] << 8) | sfr_data[1];
+
 	reg_read_m(RTL837X_REG_LINKS_89);
 	__xdata uint8_t linkbits_p89 = sfr_data[3];
 
 	reg_read_m(RTL837X_REG_LINKS);
+
+	if (up_bits != linkup_last_bits) {
+		for (uint8_t port = machine.min_port; port <= machine.max_port; port++) {
+			uint8_t was_up = (linkup_last_bits >> port) & 1;
+			uint8_t is_up = (up_bits >> port) & 1;
+			if (was_up == is_up)
+				continue;
+			print_string("Link: port "); print_byte(port);
+			if (is_up) {
+				print_string(": up -> ");
+				print_string(port_speed_name(port_speed_nibble(port, sfr_data, linkbits_p89)));
+				print_string("\n");
+			} else {
+				print_string(": down\n");
+			}
+		}
+		linkup_last_bits = up_bits;
+	}
+
 	if (cmp_4(sfr_data, linkbits_last) || (linkbits_p89 != linkbits_last_p89)) {
-		print_string("\n<new link: ");
-		print_byte(linkbits_p89); print_byte(sfr_data[0]); print_byte(sfr_data[1]);
-		print_byte(sfr_data[2]); print_byte(sfr_data[3]);
-		print_string(", was ");
-		print_byte(linkbits_last_p89); print_byte(linkbits_last[0]); print_byte(linkbits_last[1]);
-		print_byte(linkbits_last[2]); print_byte(linkbits_last[3]);
-		print_string(">\n");
 		linkbits_last_p89 = linkbits_p89;
 		if (!machine_detected.isRTL8373 && machine.n_sfp != 2) {
 			uint8_t p5 = sfr_data[2] >> 4;
@@ -1266,6 +1333,36 @@ void idle(void)
 	handle_rx();
 	// Check UIP for packets to transmit
 	handle_tx();
+
+	if (boot_log_pending && ticks >= boot_log_deadline) {
+		boot_log_pending = 0;
+		print_string("Boot: System booted RTLPlayground " VERSION_SW "\n");
+		syslog_flush();
+	}
+
+	/* Deferred reboot (web UI / firmware update) - see the comment on
+	 * pending_reboot_reason in rtl837x_common.h for why this can't
+	 * happen directly from inside httpd_appcall(). handle_tx() just
+	 * above has returned, so nothing is nested in uip_process() here -
+	 * safe to call syslog_flush() (itself a uip_process() call, for
+	 * the syslog connection) from this point on. The countdown gives
+	 * the web UI's response a few ordinary, non-reentrant handle_tx()
+	 * passes to actually go out (and be ACKed) before we reset. */
+	if (pending_reboot_reason && !reboot_countdown)
+		reboot_countdown = 10;
+	if (reboot_countdown) {
+		reboot_countdown--;
+		if (!reboot_countdown) {
+			if (pending_reboot_reason == REBOOT_FW_UPDATE)
+				print_string("Firmware: Resetting to apply update\n");
+			else if (pending_reboot_reason == REBOOT_WEB_UI)
+				print_string("Web UI: Reboot requested\n");
+			/* REBOOT_CLI already printed "RESET" at its call site. */
+			syslog_flush();
+			reset_chip();
+		}
+	}
+
 	// If STP protocol enabled, decrease STP timers to trigger actions
 	if (stp_enabled) {
 		if (!stp_clock) {
@@ -1772,6 +1869,12 @@ void main(void)
 	port_l2_static_mgmt(uip_ethaddr.addr, management_vlan, false);
 	/* After the config: a name from it wins, otherwise derive one. */
 	set_hostname_default();
+	/* Logged a few seconds into the main loop instead of right here -
+	 * see boot_log_pending's comment above its definition (DHCP, if
+	 * the config starts it, has not had a chance to get a lease yet
+	 * at this exact point in boot). */
+	boot_log_pending = 1;
+	boot_log_deadline = ticks + ((uint32_t)SYS_TICK_HZ * 3);
 	print_cmd_prompt();
 	idle_ready = 1;
 

@@ -157,7 +157,7 @@ void dhcp_addopt_server_id(void)
 
 void dhcp_send_discover(void)
 {
-	print_string("dhcp_send_discover called\n");
+	print_string("DHCP: Sending discover\n");
 	dhcp_prepare_request();
 
 	dhcp_state.opt_ptr = 0;
@@ -193,7 +193,7 @@ void dhcp_send_discover(void)
 
 void dhcp_send_request(void)
 {
-	print_string("dhcp_send_request called\n");
+	print_string("DHCP: Sending request\n");
 	dhcp_prepare_request();
 
 	dhcp_state.opt_ptr = 0;
@@ -289,7 +289,7 @@ void parse_opts(void)
 		case DHCP_END:
 			break;
 		default:
-			print_string("Unknown DHCP option: "); print_byte(DHCP_OPT[dhcp_state.opt_ptr]); write_char('\n');
+			print_string("DHCP: Unknown option: "); print_byte(DHCP_OPT[dhcp_state.opt_ptr]); write_char('\n');
 			dhcp_state.opt_ptr++;
 			dhcp_state.opt_ptr += DHCP_OPT[dhcp_state.opt_ptr];
 			dhcp_state.opt_ptr++;
@@ -315,18 +315,18 @@ void parse_dhcp(void)
 		dhcp_state.current_ip[2] = DHCP_P->your_ip[2];
 		dhcp_state.current_ip[3] = DHCP_P->your_ip[3];
 		parse_opts();
-		print_string("DHCP offer received for IP "); dhcp_print_ip(dhcp_state.current_ip);
+		print_string("DHCP: Offer received for IP "); dhcp_print_ip(dhcp_state.current_ip);
 		write_char('\n');
 		dhcp_send_request();
 	} else if (DHCP_OPT[dhcp_state.opt_ptr++] == DHCP_MESSAGE_ACK) {
 		parse_opts();
-		print_string("DHCP ACK, our IP is "); dhcp_print_ip(dhcp_state.current_ip);
+		print_string("DHCP: ACK, our IP is "); dhcp_print_ip(dhcp_state.current_ip);
 		write_char('\n');
-		print_string("DHCP netmask "); dhcp_print_ip(dhcp_state.subnet);
+		print_string("DHCP: Netmask "); dhcp_print_ip(dhcp_state.subnet);
 		write_char('\n');
-		print_string("DHCP gateway "); dhcp_print_ip(dhcp_state.router);
+		print_string("DHCP: Gateway "); dhcp_print_ip(dhcp_state.router);
 		write_char('\n');
-		print_string("DHCP lease-time ");
+		print_string("DHCP: Lease-time ");
 		print_long(dhcp_state.lease);
 		write_char('\n');
 		uip_ipaddr(&uip_hostaddr, dhcp_state.current_ip[0], dhcp_state.current_ip[1], dhcp_state.current_ip[2], dhcp_state.current_ip[3]);
@@ -365,7 +365,7 @@ void dhcp_start(void) __banked
 	if(dhcp_state.conn) {
 		uip_udp_bind(dhcp_state.conn, HTONS(DHCPC_CLIENT_PORT));
 	} else {
-		print_string("dhcp_start failed to set up socket\n");
+		print_string("DHCP: Failed to set up socket\n");
 		return;
 	}
 	get_random_32();
@@ -376,13 +376,13 @@ void dhcp_start(void) __banked
 	*tid++ = SFR_DATA_8;
 	*tid = SFR_DATA_0;
 	dhcp_state.state = DHCP_START;
-	print_string("dhcp_start done\n");
+	print_string("DHCP: Started\n");
 }
 
 
 void dhcp_stop(void) __banked
 {
-	print_string("dhcp_stop called\n");
+	print_string("DHCP: Stopped\n");
 	uip_udp_remove(dhcp_state.conn);
 	dhcp_state.state = DHCP_OFF;
 }
@@ -395,7 +395,7 @@ void dhcp_callback(uint16_t lport) __banked
 	if (!dhcp_state.state)
 		return;
 	if (uip_closed()) {
-		print_string("Closed\n");
+		print_string("DHCP: Connection closed\n");
 		return;
 	} else if (uip_newdata()) {
 		parse_dhcp();
@@ -417,7 +417,7 @@ void dhcp_callback(uint16_t lport) __banked
 				dhcp_send_request();
 				break;
 			default:
-				print_string("UNKNOWN STATE\n");
+				print_string("DHCP: Unknown state\n");
 			}
 		}
 	}

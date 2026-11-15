@@ -608,9 +608,9 @@ void parse_vlan(void)
 			management_vlan = vlan_settings.vlan;
 			port_l2_static_mgmt(uip_ethaddr.addr, management_vlan, false);
 			if (!vlan_settings.vlan)
-				print_string("Management VLAN disabled\n");
+				print_string("VLAN: Management VLAN disabled\n");
 			else
-				print_string("Management VLAN set to "); print_short(management_vlan); write_char('\n');
+				print_string("VLAN: Management VLAN set to "); print_short(management_vlan); write_char('\n');
 			return;
 		}
 
@@ -1792,8 +1792,16 @@ void cmd_parser(void) __banked
 #endif
 	if (cmd_words_len >= 1) {
 		if (cmd_compare(0, "reset")) {
-			print_string("\nRESET\n\n");
-			reset_chip();
+			print_string("\nCLI: Reboot requested\n\n");
+			/* Deferred to the main loop rather than reset_chip()'d
+			 * right here: this command can also be reached via the
+			 * web UI's terminal (execute_commands() in httpd.c's
+			 * run_cmd_body(), called straight from httpd_appcall()),
+			 * and syslog_flush()'s own uip_process() call would be
+			 * reentrant in that case - see pending_reboot_reason's
+			 * comment in rtl837x_common.h. Harmless few-pass delay
+			 * when reached from the serial console instead. */
+			pending_reboot_reason = REBOOT_CLI;
 		} else if (cmd_compare(0, "sfp")) {
 			parse_sfp();
 		} else if (cmd_compare(0, "stat")) {
@@ -1849,7 +1857,7 @@ void cmd_parser(void) __banked
 					dhcp_stop();
 				if (parse_ip(cmd_words_b[1]) != 0) {
 					uip_ipaddr(&uip_hostaddr, ip[0], ip[1], ip[2], ip[3]);
-					print_string("Setting ip: ");
+					print_string("Network: Setting ip: ");
 					print_ip(ip); write_char('\n');
 				} else {
 					cmd_error("Invalid IP address\n" \
@@ -1865,7 +1873,7 @@ void cmd_parser(void) __banked
 			} else {
 				if (parse_ip(cmd_words_b[1]) != 0) {
 					uip_ipaddr(&uip_draddr, ip[0], ip[1], ip[2], ip[3]);
-					print_string("Setting gw: ");
+					print_string("Network: Setting gw: ");
 					print_ip(ip); write_char('\n');
 				} else {
 					cmd_error("Invalid IP address\n" \
@@ -1879,7 +1887,7 @@ void cmd_parser(void) __banked
 			} else {
 				if (parse_ip(cmd_words_b[1]) != 0) {
 					uip_ipaddr(&uip_netmask, ip[0], ip[1], ip[2], ip[3]);
-					print_string("Setting netmask: ");
+					print_string("Network: Setting netmask: ");
 					print_ip(ip); write_char('\n');
 				} else {
 					cmd_error("Invalid IP address\n");
@@ -1992,10 +2000,10 @@ void cmd_parser(void) __banked
 			parse_ingress();
 		} else if (cmd_compare(0, "lldp")) {
 			if (cmd_compare(1, "on")) {
-				print_string("LLDP enabled\n");
+				print_string("LLDP: Enabled\n");
 				lldp_enabled = 1;
 			} else {
-				print_string("LLDP disabled\n");
+				print_string("LLDP: Disabled\n");
 				lldp_enabled = 0;
 			}
 		}

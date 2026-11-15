@@ -201,7 +201,7 @@ void handle_sfp(void) __banked
 		if (!gpio_pin_test(machine.sfp_port[sfp].pin_detect)) {
 			if (sfp_pins_last & (0x1 << (sfp << 2))) {
 				sfp_pins_last &= ~(0x01 << (sfp << 2));
-				print_string("\n<MODULE INSERTED>  Slot: "); write_char('1' + sfp);
+				print_string("\nSFP: Module inserted, slot "); write_char('1' + sfp);
 				sfp_wake_at[sfp] = ticks;
 				sfp_wake_pending[sfp] = 1;
 			} else if (sfp_wake_pending[sfp]
@@ -216,19 +216,19 @@ void handle_sfp(void) __banked
 			if (!(sfp_pins_last & (0x1 << (sfp << 2)))) {
 				sfp_pins_last |= 0x01 << (sfp << 2);
 				sfp_wake_pending[sfp] = 0;
-				print_string("\n<MODULE REMOVED>  Slot: "); write_char('1' + sfp); write_char('\n');
+				print_string("\nSFP: Module removed, slot "); write_char('1' + sfp); write_char('\n');
 			}
 		}
 
 		if (!gpio_pin_test(machine.sfp_port[sfp].pin_los)) {
 			if (sfp_pins_last & (0x2 << (sfp << 2))) { // 0x2 0x08
 				sfp_pins_last &= ~(0x02 << (sfp << 2));
-				print_string("\n<SFP-RX OK>  Slot: "); write_char('1' + sfp); write_char('\n');
+				print_string("\nSFP: RX OK, slot "); write_char('1' + sfp); write_char('\n');
 			}
 		} else {
 			if (!(sfp_pins_last & 0x2 << (sfp << 2))) {
 				sfp_pins_last |= 0x02 << (sfp << 2);
-				print_string("\n<SFP-RX LOS>  Slot: "); write_char('1' + sfp); write_char('\n');
+				print_string("\nSFP: RX loss of signal, slot "); write_char('1' + sfp); write_char('\n');
 			}
 		}
 	}

@@ -146,6 +146,22 @@ extern __xdata char hostname[24];
 extern __xdata uint8_t uip_buf[UIP_CONF_BUFFER_SIZE+2];
 extern __xdata struct uip_eth_addr uip_ethaddr;
 
+/* Set by an httpd_appcall() handler to request a reboot once it's
+ * safe to do so - see the comment above its definition in httpd.c for
+ * why this can't just reset_chip() immediately. Checked from the main
+ * loop (idle() in rtlplayground.c). */
+#define REBOOT_NONE		0
+#define REBOOT_FW_UPDATE	1
+#define REBOOT_WEB_UI		2
+/* The CLI's "reset" command: reachable from the serial console
+ * directly (not nested in uip_process()) but also from the web UI's
+ * terminal (execute_commands(), nested - see REBOOT_WEB_UI's comment),
+ * so it always defers through this same flag for safety. Prints its
+ * own "RESET" message at the call site instead of a generic one from
+ * the main loop, since the console case has no reason to wait. */
+#define REBOOT_CLI		3
+extern __xdata uint8_t pending_reboot_reason;
+
 // Headers for calls in the common code area (HOME/BANK0)
 void print_string_no_syslog(__code const char *p);
 void print_string_newline_no_syslog(__code const char *p);
@@ -171,6 +187,9 @@ void reg_write_m(uint16_t reg_addr);
 void sds_read(uint8_t sds_id, uint8_t page, uint8_t reg);
 void sds_write_v(uint8_t sds_id, uint8_t page, uint8_t reg, uint16_t v);
 void delay(uint16_t t);
+/* Services pending RX (including ARP replies) outside the main loop's
+ * own call to it - see syslog_flush() in syslog.c. */
+void handle_rx(void);
 void write_char_no_syslog(char c);
 void write_char(char c);
 void print_reg(uint16_t reg);

@@ -47,7 +47,7 @@ void sds_config_mac(uint8_t sds, uint8_t mode) __banked
 	else
 		sfr_data[2] &= 0x03;
 	reg_write_m(RTL837X_REG_SDS_MODES);
-	print_string("\nRTL837X_REG_SDS_MODES: ");
+	print_string("\nSDS: RTL837X_REG_SDS_MODES: ");
 	print_reg(RTL837X_REG_SDS_MODES);
 	print_string("\n");
 }
@@ -68,7 +68,7 @@ void early_boot_handle_button(void) __banked
 		return;
 
 	set_sys_led_state(SYS_LED_FAST);
-	print_string("\n[Reset button held at boot]\n");
+	print_string("\nButton: Reset button held at boot\n");
 
 	if (gpio_pin_test(machine.reset_pin))
 		return;
@@ -87,7 +87,7 @@ void early_boot_handle_button(void) __banked
 		__xdata uint32_t held_ticks = ticks - start_ticks;
 
 		if (held_ticks > max_hold_ticks) {
-			print_string("[Button held >30s at boot; continuing normal boot]\n");
+			print_string("Button: Held >30s at boot; continuing normal boot\n");
 			return;
 		}
 
@@ -106,7 +106,7 @@ void early_boot_handle_button(void) __banked
 	set_sys_led_state(SYS_LED_ON);
 
 	if ((ticks - start_ticks) >= min_hold_ticks) {
-		print_string("[Button held 10s-30s at boot; restoring default config]\n");
+		print_string("Button: Held 10s-30s at boot; restoring default config\n");
 		set_sys_led_state(SYS_LED_FAST);
 		flash_default_config();
 		delay(3UL * SYS_TICK_HZ);
@@ -123,7 +123,7 @@ void early_boot_handle_button(void) __banked
  */
 void sds_config(uint8_t sds, uint8_t mode) __banked
 {
-	print_string("sds_config sds: "); print_byte(sds); print_string(", mode: "); print_byte(mode); write_char('\n');
+	print_string("SDS: Configuring sds: "); print_byte(sds); print_string(", mode: "); print_byte(mode); write_char('\n');
 	sds_config_mac(sds, mode);
 
 	if (mode == SDS_10GR || mode == SDS_QXGMII)
@@ -161,7 +161,7 @@ void sds_config(uint8_t sds, uint8_t mode) __banked
 		page = 0x26;
 		break;
 	default:
-		print_string("Error in SDS Mode\n");
+		print_string("SDS: Error, invalid mode\n");
 		return;
 	}
 	sds_write_v(sds, 0x36, 0x10, v); // Q003610:0200
@@ -307,7 +307,7 @@ void rtl8373_revision(void) __banked
 	delay(50);
 
 	reg_read_m(RTL837X_REG_CHIP_INFO);
-	print_string("CPU revision: "); print_byte(sfr_data[2]); print_byte(sfr_data[2]); write_char('\n');
+	print_string("Boot: CPU revision: "); print_byte(sfr_data[2]); print_byte(sfr_data[2]); write_char('\n');
 	sfr_mask_data(2, 0x0a, 0x00); 	// Enable reading version
 	reg_write_m(RTL837X_REG_CHIP_INFO);
 }
@@ -322,7 +322,7 @@ void rtl8373_revision(void) __banked
  */
 void init_smi(void) __banked
 {
-	print_string("\ninit_switch called\n");
+	print_string("\nBoot: Initializing SMI\n");
 
 	/* Set the SMI(i.e.I2C) type for PHY polling, 0b01 is 2.5/10G PHY. Disable (0b00) for the SFP-ports
 	 * which are at port 8 and additionally at port 3 for a dual SFP device
@@ -400,7 +400,7 @@ void setup_i2c(void) __banked
 		uint8_t i2c = machine.sfp_port[sfp].i2c;
 		uint8_t scl_bus = (i2c >> RTL837X_REG_I2C_SCL_SHIFT) & RTL837X_REG_I2C_SCL_MASK;
 		uint8_t sda_bus = (i2c >> RTL837X_REG_I2C_SDA_SHIFT) & RTL837X_REG_I2C_SDA_MASK;
-		print_string("Configuring I2C for SFP idx="); print_byte(sfp); print_string(" SCL="); print_byte(scl_bus); print_string(", SDA="); print_byte(sda_bus); write_char('\n');
+		print_string("Boot: Configuring I2C for SFP idx="); print_byte(sfp); print_string(" SCL="); print_byte(scl_bus); print_string(", SDA="); print_byte(sda_bus); write_char('\n');
 		// `& RTL837X_REG_I2C_SCL_MASK` is needed to silens a compiler warning 110.
 		switch (scl_bus & RTL837X_REG_I2C_SCL_MASK) {
 			case 3:

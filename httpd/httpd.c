@@ -7,6 +7,7 @@
 #include "rtl837x_flash.h"
 #include "uip.h"
 #include "html_data.h"
+#include "syslog.h"
 
 // #define DEBUG
 #include "debug.h"
@@ -75,6 +76,18 @@ __xdata char passwd[21];
 // Set when a verified firmware upload awaits its response ACK, after
 // which the chip resets to apply the staged image
 __xdata uint8_t fw_reset_pending;
+/* Set from an httpd_appcall() handler to request a reboot, instead of
+ * logging/resetting right there: this function runs nested inside
+ * uip_process() (it IS uip_process()'s UDP_APPCALL/TCP_APPCALL), which
+ * owns the single shared uip_buf/uip_conn for the request currently
+ * being handled. syslog_flush() does its own uip_process() call (for
+ * the syslog UDP connection) to get a message out before a reset that
+ * never returns - calling that reentrantly while httpd_appcall() is
+ * still mid-build of this connection's own response corrupts it. The
+ * main loop (idle() in rtlplayground.c) checks this flag once handle_tx()
+ * has returned, i.e. once nothing is nested in uip_process() - safe to
+ * call syslog_flush() from there. */
+__xdata uint8_t pending_reboot_reason;
 // Up to MAX_SESSIONS concurrent logins, each in its own slot
 __xdata char session_id[MAX_SESSIONS][SESSION_ID_LENGTH + 1];
 __xdata uint8_t authenticated;
@@ -111,6 +124,7 @@ void httpd_init(void) __banked
 	// handling one, and nothing has set it yet at init time.
 	uip_conns[0].appstate.tstate = TSTATE_CLOSED;
 	fw_reset_pending = 0; // xdata is not zeroed by the startup code
+	pending_reboot_reason = REBOOT_NONE;
 	// xdata is not zeroed by the startup code; an empty session_id[i][0]
 	// marks a slot free
 	for (i = 0; i < MAX_SESSIONS; i++)
@@ -442,6 +456,7 @@ static uint8_t config_take(void)
 				flash_region.addr = CONFIG_START;
 				flash_region.len = cfg_end - cfg_body + 1;
 				flash_write_bytes(config_buf + cfg_body);
+				print_string("System: Configuration saved to flash\n");
 				return 1;
 			}
 			cfg_hdr++;
@@ -511,14 +526,19 @@ uint8_t stream_upload(void)
 				// browser complete the response without waiting for
 				// the connection close (which a reset would swallow)
 				if (crc_final == 0xb001) {
-					print_string("Checksum OK.\nUpload to flash done, will reset!\n");
+					/* One line, not two: back-to-back print_string()
+					 * calls land in the same syslog datagram (nothing
+					 * runs between them to trigger a drain), so an
+					 * embedded '\n' here shows up as a literal "#012"
+					 * in the log instead of a real line break. */
+					print_string("Firmware: Checksum OK, upload to flash done, will reset!\n");
 					slen = strtox(outbuf, "HTTP/1.1 200 OK\r\nContent-Length: 33\r\n"
 						"Content-Type: text/plain\r\n\r\n"
 						"OK: checksum verified, rebooting\n");
 					// Reset once the response is fully ACKed
 					fw_reset_pending = 1;
 				} else {
-					print_string("Checksum incorrect! Aborting.\n");
+					print_string("Firmware: Checksum incorrect! Aborting.\n");
 					slen = strtox(outbuf, "HTTP/1.1 400 Bad Request\r\nContent-Length: 33\r\n"
 						"Content-Type: text/plain\r\n\r\n"
 						"NO: checksum failed, not applied\n");
@@ -554,7 +574,7 @@ uint8_t stream_upload(void)
 				 * keeps writing, and on a flash exactly this size the address
 				 * wraps onto the running image at zero. */
 				if (uptr >= (uint32_t)FIRMWARE_UPLOAD_START * 2) {
-					print_string("Upload runs past the image area! Aborting.\n");
+					print_string("Firmware: Upload runs past the image area! Aborting.\n");
 					slen = strtox(outbuf, "HTTP/1.1 400 Bad Request\r\nContent-Length: 30\r\n"
 						"Content-Type: text/plain\r\n\r\n"
 						"NO: upload exceeds image area\n");
@@ -592,7 +612,7 @@ static void handle_config_fragment(__xdata uint8_t *p)
 
 	frag_len = uip_len - (p - (__xdata uint8_t *)uip_appdata);
 	if (pre_acc + frag_len >= CONFIG_UPLOAD_BUF) {
-		print_string("Configuration too large, aborting.\n");
+		print_string("System: Configuration too large, aborting.\n");
 		config_upload = 0;
 		s->tstate = TSTATE_NONE;
 		send_bad_request();
@@ -622,7 +642,7 @@ static void handle_firmware_fragment(__xdata uint8_t *p)
 
 	frag_len = uip_len - (p - (__xdata uint8_t *)uip_appdata);
 	if (pre_acc + frag_len >= CONFIG_UPLOAD_BUF) {
-		print_string("Firmware upload header too large, aborting.\n");
+		print_string("Firmware: Upload header too large, aborting.\n");
 		config_upload = 0;
 		s->tstate = TSTATE_NONE;
 		send_bad_request();
@@ -816,11 +836,11 @@ void handle_post(void)
 			}
 			if (flash_size < FIRMWARE_UPLOAD_START*2)
 			{
-				print_string("Flash too small for firmware upload!\n");
+				print_string("Firmware: Flash too small for upload!\n");
 				send_bad_request();
 				return;
 			}
-			print_string("Firmware upload started.");
+			print_string("Firmware: Upload started.\n");
 			config_upload = 0;
 			uptr = FIRMWARE_UPLOAD_START;
 			verify_crc = 1;
@@ -964,9 +984,10 @@ void httpd_appcall(void)
 			s->tstate = TSTATE_TX;
 		} else if (fw_reset_pending) {
 			// The upload verdict has been fully ACKed by the client;
-			// now it is safe to reset and apply the staged image
-			print_string("Resetting to apply update\n");
-			reset_chip();
+			// now it is safe to reset and apply the staged image.
+			// Deferred to the main loop - see pending_reboot_reason's
+			// comment above its definition.
+			pending_reboot_reason = REBOOT_FW_UPDATE;
 		}
 	} else if (uip_newdata() && s->tstate == TSTATE_POST) {
 		if (config_upload || uip_len <= max_upload) {
@@ -980,7 +1001,10 @@ void httpd_appcall(void)
 			// through the normal TX path
 			if (s->tstate == TSTATE_NONE && slen)
 				goto do_send;
-			write_char('.');
+			/* Console-only progress indicator: one per TCP segment, so
+			 * a multi-MB upload prints hundreds of these - fine on the
+			 * serial console, just noise if mirrored to syslog. */
+			write_char_no_syslog('.');
 		} else {
 			send_bad_request();
 			goto do_send;
@@ -1029,6 +1053,21 @@ void httpd_appcall(void)
 		entry = find_entry(q);
 		dbg_string("Entry is: "); dbg_byte(entry); dbg_char('\n');
 		if (entry == 0xff) {
+			if (is_word(q, "/hostname.json")) {
+				/* Unauthenticated on purpose: shown on the login
+				 * screen so an admin can tell which device they're
+				 * about to sign into. Same trust level as
+				 * login.html/favicon.ico being served pre-auth. */
+				slen = strtox(outbuf, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n{\"hostname\":\"");
+				for (uint8_t i = 0; hostname[i]; i++) {
+					uint8_t c = hostname[i];
+					if (c < 0x20 || c > 0x7e || c == '"' || c == '\\')
+						c = '.';
+					outbuf[slen++] = c;
+				}
+				slen += strtox(outbuf + slen, "\"}");
+				goto do_send;
+			}
 			if (!authenticated) {
 				dbg_string("Not authorized!\n");
 				send_unauthorized();
@@ -1053,21 +1092,6 @@ void httpd_appcall(void)
 			} else if (is_word(q, "/l2.json")) {
 				parse_short(q + 13); // e.g.: /l2.json?idx=10
 				send_l2(short_parsed);
-			if (is_word(q, "/hostname.json")) {
-				/* Unauthenticated on purpose: shown on the login
-				 * screen so an admin can tell which device they're
-				 * about to sign into. Same trust level as
-				 * login.html/favicon.ico being served pre-auth. */
-				slen = strtox(outbuf, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n{\"hostname\":\"");
-				for (uint8_t i = 0; hostname[i]; i++) {
-					uint8_t c = hostname[i];
-					if (c < 0x20 || c > 0x7e || c == '"' || c == '\\')
-						c = '.';
-					outbuf[slen++] = c;
-				}
-				slen += strtox(outbuf + slen, "\"}");
-				goto do_send;
-			}
 			} else if (is_word(q, "/l2_del.json")) {
 				parse_short(q + 17);
 				l2_delete(short_parsed);
@@ -1093,9 +1117,14 @@ void httpd_appcall(void)
 				clear_command_history();
 				send_mtu(); // dummy response
 			} else if (is_word(q, "/reset")) {
-				uip_close();
-				delay(1000); //wait for the close packet to be sent, otherwise the browser will retry
-				reset_chip();
+				/* Logging + the actual reset are deferred to the main
+				 * loop - see pending_reboot_reason's comment above its
+				 * definition. A normal response (like every other
+				 * endpoint here) lets httpd_appcall() return and the
+				 * response go out through the ordinary, non-reentrant
+				 * path - app.js ignores it either way (.catch(()=>{})). */
+				pending_reboot_reason = REBOOT_WEB_UI;
+				send_ok();
 			} else {
 				send_not_found();
 			}

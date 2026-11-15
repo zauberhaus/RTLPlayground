@@ -677,7 +677,7 @@ void stp_in(void) __banked
 			stp_pflags[port] &= ~STP_PF_OPEREDGE;
 			return;
 		}
-		print_string("Updating Root bridge\n");
+		print_string("STP: Updating root bridge\n");
 		root_bridge.prio = STP_I->root.prio;
 		root_bridge.ext = STP_I->root.ext;
 		memcpy(root_bridge.mac, STP_I->root.mac, 6);
@@ -893,7 +893,7 @@ static void stp_fdb_update(__xdata uint16_t pmask)
 
 void stp_setup(void) __banked
 {
-	print_string("Enabling STP: ");
+	print_string("STP: Enabling, states register: ");
 	stp_lag_map();
 	sfr_data[0] = sfr_data[1] = sfr_data[2] = sfr_data[3] = 0;
 	for (stp_i = 0; stp_i < STP_ENTITIES; stp_i++) {
@@ -980,13 +980,13 @@ void stp_parse(void) __banked __reentrant
 	uint8_t ent;
 
 	if (cmd_compare(1, "on")) {
-		print_string("STP enabled\n");
+		print_string("STP: Enabled\n");
 		stp_enabled = 1;
 		stp_setup();
 		return;
 	}
 	if (cmd_compare(1, "off")) {
-		print_string("STP disabled\n");
+		print_string("STP: Disabled\n");
 		stp_off();
 		stp_enabled = 0;
 		return;

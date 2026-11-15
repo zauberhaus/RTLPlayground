@@ -26,5 +26,9 @@ void syslog_init(void) __banked;
 void syslog_start(void) __banked;
 void syslog_stop(void) __banked;
 void syslog_callback(uint16_t lport) __banked;
+/* Sends anything queued in logbuf right away; see the comment above
+ * its definition in syslog.c. Call after logging a message that must
+ * reach the syslog server before a reset_chip() that follows it. */
+void syslog_flush(void) __banked;
 
 #endif

@@ -2,6 +2,7 @@
 #include "syslog.h"
 #include "cmd_parser.h"
 #include "uip/uip.h"
+#include "uip/uip_arp.h"
 #include "rtl837x_common.h"
 
 #pragma codeseg BANK2
@@ -121,5 +122,124 @@ void syslog_callback(uint16_t lport) __banked
 		uip_udp_send(log_size + syslog_hdr);
 		state.readptr = state.writeptr;
 		state.line_available = 0;
+	}
+}
+
+/* Scratch for syslog_flush()/sf_arp_resolved() - module scope, not
+ * function-local: this file is not built --stack-auto (see snmp.c's
+ * comment on the same subject), so a plain local is overlaid into
+ * internal RAM, which this build has little spare of. */
+static __xdata struct uip_udp_conn * __xdata sf_conn;
+static __xdata uint8_t sf_wait;
+static __xdata uint16_t sf_target[2];
+static __xdata uint8_t sf_j;
+static __code const uint16_t sf_broadcast_ip[2] = {0xffff, 0xffff};
+
+/* Is dest already resolved in the ARP cache (or the default gateway,
+ * if dest is off-subnet - same target uip_arp_out() would resolve to)?
+ * Duplicates that decision read-only, rather than calling into
+ * uip_arp.c, because uip_arp.c is BANK1 - already at its code-space
+ * limit (see the .map report) - while this file (BANK2) still has
+ * room. */
+static uint8_t sf_arp_resolved(__xdata uip_ipaddr_t *dest)
+{
+	if (uip_ipaddr_cmpc(*dest, sf_broadcast_ip))
+		return 1;
+
+	if (!uip_ipaddr_maskcmp(*dest, uip_hostaddr, uip_netmask))
+		uip_ipaddr_copy(sf_target, uip_draddr);
+	else
+		uip_ipaddr_copy(sf_target, *dest);
+
+	for (sf_j = 0; sf_j < UIP_ARPTAB_SIZE; sf_j++) {
+		if (uip_ipaddr_cmpx(sf_target, arp_table[sf_j].ipaddr))
+			return 1;
+	}
+	return 0;
+}
+
+/* Mirrors uip.c's own (private) BUF macro - #define BUF ((__xdata
+ * struct uip_tcpip_hdr *)&uip_buf[UIP_LLH_LEN]) - using only public
+ * declarations (struct uip_tcpip_hdr is in uip.h), so sf_trigger_arp()
+ * below can address the IP header's destipaddr field without needing
+ * anything from uip_arp.c - see sf_arp_resolved()'s comment on why
+ * that file is off limits for new code. */
+#define SF_IPBUF ((__xdata struct uip_tcpip_hdr *)&uip_buf[UIP_LLH_LEN])
+
+/* Actively triggers ARP resolution for dest by emitting a request.
+ * Deliberately does not touch logbuf or uip_udp_conn: unlike calling
+ * uip_arp_out() on an already-pending real send (which would
+ * substitute the request for whatever packet syslog_callback() just
+ * built - see its own doc comment, and there would be nothing left to
+ * retry from), this builds its own throwaway probe packet first, so
+ * syslog_flush() below can check resolution *before* ever attempting
+ * the real send - see its comment for why that matters. */
+static void sf_trigger_arp(__xdata uip_ipaddr_t *dest)
+{
+	uip_ipaddr_copy(SF_IPBUF->destipaddr, *dest);
+	uip_arp_out();
+	if (uip_len > 0)
+		tcpip_output();
+}
+
+/* Forces an out-of-band drain of the syslog ring buffer and sends it
+ * right away, instead of waiting for the next main-loop pass (via
+ * handle_tx()'s periodic UDP walk, which normally calls
+ * syslog_callback() above once per loop) to notice it. Needed before
+ * reset_chip(): that call never returns, so a message queued right
+ * before a reboot would otherwise sit in logbuf unsent forever - see
+ * the reboot log calls in cmd_parser.c/httpd.c/rtlplayground.c. A
+ * no-op when syslog is not running or nothing is queued.
+ *
+ * Also copes with a cold ARP cache, which would otherwise silently
+ * lose exactly the message this function exists to protect:
+ * uip_arp_out() drops whatever packet is pending in favour of an ARP
+ * request on a cache miss (see its own doc comment), and
+ * syslog_callback() has *already* marked the buffered data as sent by
+ * the time that happens (it advances readptr right after building the
+ * packet - uip_udp_send() only prepares it, the actual
+ * resolve-and-transmit is the caller's job, below). Normally that is
+ * invisible: syslog_callback() runs on every main-loop pass, so a
+ * dropped first attempt just means the next pass's packet succeeds
+ * instead. This function runs exactly once, so it resolves first (if
+ * needed - sf_trigger_arp() above, which never touches the real
+ * message) and waits briefly for the reply, *then* makes a single
+ * send attempt - never a retry-after-send: an earlier version of this
+ * function detected a cold cache only after sending and re-queued the
+ * same data to try again, which could race a syslog_callback() call
+ * triggered independently (e.g. by handle_rx() in the wait loop,
+ * processing an unrelated packet that happens to match this
+ * connection) into sending the same message twice. */
+void syslog_flush(void) __banked
+{
+	/* syslog_conn's declared type (a generic pointer, matching what
+	 * uip_udp_new() returns in syslog_start()) is a different pointer
+	 * representation than uip_udp_conn's (__xdata struct uip_udp_conn
+	 * * __xdata) - SDCC rejects the implicit conversion, so cast once
+	 * here and reuse sf_conn below instead of repeating it. */
+	sf_conn = (__xdata struct uip_udp_conn * __xdata)state.syslog_conn;
+
+	if (!sf_conn)
+		return;
+	if (state.readptr == state.writeptr && !state.line_available)
+		return;
+
+	if (!sf_arp_resolved(&sf_conn->ripaddr)) {
+		sf_trigger_arp(&sf_conn->ripaddr);
+		/* ~20 ticks: long enough for a LAN round trip, short enough
+		 * not to stall a reboot noticeably if the server (or the
+		 * gateway, for an off-subnet server) is unreachable. */
+		for (sf_wait = 0; sf_wait < 20 &&
+		     !sf_arp_resolved(&sf_conn->ripaddr); sf_wait++) {
+			delay(1);
+			handle_rx();
+		}
+	}
+
+	uip_udp_conn = sf_conn;
+	uip_process(UIP_UDP_TIMER);
+	if (uip_len > 0) {
+		uip_arp_out();
+		tcpip_output();
 	}
 }
