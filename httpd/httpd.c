@@ -1053,6 +1053,21 @@ void httpd_appcall(void)
 			} else if (is_word(q, "/l2.json")) {
 				parse_short(q + 13); // e.g.: /l2.json?idx=10
 				send_l2(short_parsed);
+			if (is_word(q, "/hostname.json")) {
+				/* Unauthenticated on purpose: shown on the login
+				 * screen so an admin can tell which device they're
+				 * about to sign into. Same trust level as
+				 * login.html/favicon.ico being served pre-auth. */
+				slen = strtox(outbuf, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n{\"hostname\":\"");
+				for (uint8_t i = 0; hostname[i]; i++) {
+					uint8_t c = hostname[i];
+					if (c < 0x20 || c > 0x7e || c == '"' || c == '\\')
+						c = '.';
+					outbuf[slen++] = c;
+				}
+				slen += strtox(outbuf + slen, "\"}");
+				goto do_send;
+			}
 			} else if (is_word(q, "/l2_del.json")) {
 				parse_short(q + 17);
 				l2_delete(short_parsed);

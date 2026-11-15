@@ -686,7 +686,17 @@ void launch(struct Server *server)
 
 			if (is_word(buffer, "GET")) {
 				scan_header(buffer);
-				if (!strncmp(&buffer[4], "/status.json", 12)) {
+				if (!strncmp(&buffer[4], "/hostname.json", 14)) {
+					/* Unauthenticated, like the real firmware: shown
+					 * on the login screen pre-auth. */
+					printf("Hostname request\n");
+					char *header = "HTTP/1.1 200 OK\r\n"
+							"Content-Type: application/json; charset=UTF-8\r\n\r\n";
+					char *body = "{\"hostname\":\"pluto\"}";
+					write(new_socket, header, strlen(header));
+					write(new_socket, body, strlen(body));
+					goto done;
+				} else if (!strncmp(&buffer[4], "/status.json", 12)) {
 					printf("Status request\n");
 					if (!authenticated)
 						send_unauthorized(new_socket);
