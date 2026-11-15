@@ -4,8 +4,17 @@
 #include <stdint.h>
 
 /*
- * Select your machine type below
+ * Select your machine type below.
+ *
+ * Skipped entirely when MACHINE_CLI_OVERRIDE is defined (i.e. the
+ * build passed MACHINE=... on the command line - see the Makefile):
+ * otherwise this block's own #define would stay active alongside the
+ * one from -D, and since machine.c's MACHINE_* dispatch is one long
+ * #if/#elif chain, whichever of the two happens to appear first in
+ * that chain wins - silently building for the wrong machine while
+ * still naming the output after the one that was actually requested.
  */
+#ifndef MACHINE_CLI_OVERRIDE
 // Legacy KP-9000 4+2 targets. Prefer the PCB-revision-specific targets below.
 // #define MACHINE_KP_9000_6XHML_X2
 // #define MACHINE_KP_9000_6XH_X2

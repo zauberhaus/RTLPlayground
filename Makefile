@@ -17,7 +17,13 @@ SUBDIRSCLEAN=$(addsuffix clean,$(SUBDIRS))
 ifeq ($(MACHINE),)
 	MACHINE:= $(shell grep "^\s*#define MACHINE_" machine.h | sed "s/^\s*#define MACHINE_//")
 else
-	CC_FLAGS += -DMACHINE_$(MACHINE)
+	# MACHINE_CLI_OVERRIDE makes machine.h skip its own hardcoded
+	# selection; without it, that selection would stay active
+	# alongside -DMACHINE_$(MACHINE), and since machine.c dispatches
+	# on one long #if/#elif chain, whichever of the two comes first
+	# in that chain silently wins - building the wrong machine under
+	# the requested machine's output filename.
+	CC_FLAGS += -DMACHINE_CLI_OVERRIDE -DMACHINE_$(MACHINE)
 endif
 
 ifeq ($(CI),1)

@@ -1,36 +1,48 @@
 #!/usr/bin/env bash
 #
-# Pull the latest changes from main and build a firmware .bin file that can
-# be uploaded through the RTLPlayground web interface ("Firmware update" tab).
+# Build a firmware .bin file locally, using the locally installed
+# toolchain (sdcc, make, python3, ... - see README for what to
+# install), that can be uploaded through the RTLPlayground web
+# interface ("Firmware update" tab).
 #
 # Usage:
-#   ./update-firmware.sh [--oem] [--mac aa:bb:cc:dd:ee:ff] [MACHINE]
+#   ./update-firmware.sh [--machine MACHINE] [--oem] [--mac aa:bb:cc:dd:ee:ff]
 #
-# --oem            Also build the OEM upgrade image (installer/output/rtlplayground_oem_upgrade.bin),
-#                   needed only to move a device off its original OEM firmware onto RTLPlayground
-#                   for the first time (README section 2). Not needed for devices already running
-#                   RTLPlayground.
-# --mac <address>  Bake a "mac <address>" line into the default config.txt for this build only,
-#                   so the device comes up with that management MAC at first boot. config.txt is
-#                   restored to its original content once the build finishes.
-#
-# MACHINE defaults to $MACHINE if set in the environment, otherwise falls
-# back to the machine that was last built in output/.
+# --machine <name>  Target machine, e.g. KP_9000_9XHML_X_V3_1 (see machine.h
+#                    for the full list). Defaults to $MACHINE if set in the
+#                    environment; if not given at all, falls back to
+#                    whichever machine is currently active in machine.h.
+# --oem             Also build the OEM upgrade image
+#                    (installer/output/rtlplayground_oem_upgrade.bin), needed
+#                    only to move a device off its original OEM firmware onto
+#                    RTLPlayground for the first time (README section 2). Not
+#                    needed for devices already running RTLPlayground.
+# --mac <address>   Bake a "mac <address>" line into the default config.txt
+#                    for this build only, so the device comes up with that
+#                    management MAC at first boot. config.txt is restored to
+#                    its original content once the build finishes.
 
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-DOCKER_IMAGE=rtlplayground-dev
-
 # --- parse args ----------------------------------------------------------------
 BUILD_OEM=0
 MAC_ADDRESS=""
+TARGET_MACHINE="${MACHINE:-}"
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--oem)
 		BUILD_OEM=1
 		shift
+		;;
+	--machine)
+		TARGET_MACHINE="${2:-}"
+		if [ -z "$TARGET_MACHINE" ]; then
+			echo "error: --machine requires a name, e.g. --machine KP_9000_9XHML_X_V3_1" >&2
+			exit 1
+		fi
+		shift 2
 		;;
 	--mac)
 		MAC_ADDRESS="${2:-}"
@@ -40,8 +52,13 @@ while [ $# -gt 0 ]; do
 		fi
 		shift 2
 		;;
+	-h|--help)
+		sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+		exit 0
+		;;
 	*)
-		break
+		echo "error: unknown argument '$1' (see --help)" >&2
+		exit 1
 		;;
 	esac
 done
@@ -50,33 +67,23 @@ if [ -n "$MAC_ADDRESS" ] && ! [[ "$MAC_ADDRESS" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa
 	exit 1
 fi
 
+# --- check the local toolchain is present --------------------------------------
+for tool in sdcc make python3 gcc; do
+	command -v "$tool" >/dev/null 2>&1 || {
+		echo "error: '$tool' not found on PATH; see README for local build dependencies" \
+		     "(or Dockerfile for the exact package list)." >&2
+		exit 1
+	}
+done
+
 # --- determine target machine -------------------------------------------------
-MACHINE="${1:-${MACHINE:-}}"
-if [ -z "$MACHINE" ] && [ -L output/rtlplayground.bin ]; then
-	MACHINE="$(basename "$(dirname "$(readlink output/rtlplayground.bin)")")"
+MAKE_ARGS=()
+if [ -n "$TARGET_MACHINE" ]; then
+	MAKE_ARGS+=("MACHINE=$TARGET_MACHINE")
+	echo "==> Target machine: $TARGET_MACHINE"
+else
+	echo "==> No --machine given; building whichever machine is currently active in machine.h"
 fi
-if [ -z "$MACHINE" ]; then
-	echo "error: no MACHINE given and none could be detected from output/." >&2
-	echo "usage: $0 MACHINE   (e.g. $0 KP_9000_9XHML_X_V3_1)" >&2
-	exit 1
-fi
-echo "==> Target machine: $MACHINE"
-
-# --- refuse to pull over local changes ---------------------------------------
-current_branch="$(git rev-parse --abbrev-ref HEAD)"
-if [ "$current_branch" != "main" ]; then
-	echo "error: currently on branch '$current_branch', not 'main'. Switch to main first." >&2
-	exit 1
-fi
-if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-	echo "error: working tree has uncommitted changes to tracked files. Commit or stash them first." >&2
-	exit 1
-fi
-
-# --- pull latest main ---------------------------------------------------------
-echo "==> Fetching latest main..."
-git fetch origin main
-git merge --ff-only origin/main
 
 # --- optionally bake a MAC address into config.txt for this build only -------
 if [ -n "$MAC_ADDRESS" ]; then
@@ -91,13 +98,9 @@ if [ -n "$MAC_ADDRESS" ]; then
 	echo "==> Baked mac $MAC_ADDRESS into config.txt for this build (restored afterward)"
 fi
 
-# --- build the dev container --------------------------------------------------
-echo "==> Building dev container image..."
-docker build -t "$DOCKER_IMAGE" .
-
 # --- build the firmware --------------------------------------------------------
-echo "==> Building firmware for MACHINE=$MACHINE..."
-docker run --rm -v "$(pwd):/workspace" "$DOCKER_IMAGE" make MACHINE="$MACHINE"
+echo "==> Building firmware..."
+make "${MAKE_ARGS[@]}"
 
 BIN_PATH="$(readlink -f output/rtlplayground.bin)"
 echo "==> Build complete."
@@ -107,7 +110,7 @@ echo "    $BIN_PATH"
 # --- optionally build the OEM upgrade image -----------------------------------
 if [ "$BUILD_OEM" -eq 1 ]; then
 	echo "==> Building OEM upgrade image..."
-	docker run --rm -v "$(pwd):/workspace" -w /workspace/installer "$DOCKER_IMAGE" make
+	(cd installer && make)
 	OEM_BIN_PATH="$(readlink -f installer/output/rtlplayground_oem_upgrade.bin)"
 	echo "==> OEM upgrade image built."
 	echo "    Upload this file ONLY through the original OEM web interface (one-time move to RTLPlayground):"
